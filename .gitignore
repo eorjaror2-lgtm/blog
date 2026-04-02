@@ -1,0 +1,11 @@
+# System Files
+.DS_Store
+Thumbs.db
+
+# IDE Files
+.vscode/
+.idea/
+
+# Local configuration
+.env
+local.settings.json
