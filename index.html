@@ -379,7 +379,7 @@
 
 글자 수는 충분히 길게 가져가며, 가독성을 위해 한 문단은 3~4줄을 넘기지 마세요.`;
 
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`;
 
             try {
                 const response = await fetch(url, {
@@ -389,7 +389,12 @@
                 });
 
                 const data = await response.json();
-                if (data.candidates && data.candidates[0].content) {
+                
+                if (data.error) {
+                    throw new Error(data.error.message || "API 오류가 발생했습니다.");
+                }
+
+                if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts) {
                     const output = data.candidates[0].content.parts[0].text;
                     resultText.value = output;
                     
@@ -397,19 +402,22 @@
                     const chars = output.replace(/\s/g, "").length;
                     document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
                     
-                    const keywords = (output.match(new RegExp(mainKeyword, 'g')) || []).length;
+                    const escapedKeyword = mainKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const keywords = (output.match(new RegExp(escapedKeyword, 'g')) || []).length;
                     document.getElementById('keywordDensity').innerHTML = `키워드 반복: <b>${keywords}</b>회`;
-                    
-                    resultContainer.classList.add('active');
-                    window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
+                } else if (data.candidates && data.candidates[0].finishReason === "SAFETY") {
+                    throw new Error("안전 정책에 의해 원고가 생성되지 않았습니다. 다른 키워드를 시도해 주세요.");
                 } else {
-                    resultText.value = "원고 생성 중 오류가 발생했습니다. API 키를 다시 확인해주세요.";
+                    throw new Error("원고 생성 결과가 없습니다. API 키와 설정을 확인해주세요.");
                 }
             } catch (e) {
-                resultText.value = "네트워크 오류: " + e.message;
+                resultText.value = "❌ 오류 발생: " + e.message;
+                console.error(e);
             } finally {
                 generateBtn.disabled = false;
                 loading.style.display = 'none';
+                resultContainer.classList.add('active'); // 항상 보여줌 (오류 메시지 포함)
+                window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
             }
         }
 
