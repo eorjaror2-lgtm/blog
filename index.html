@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>전문의 전용 AI 블로그 마스터</title>
+    <style>
+        /* [Premium Design System] */
+        @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+
+        :root {
+            --primary: #1e3a8a; /* Deep Navy */
+            --accent: #2563eb;  /* Medical Blue */
+            --bg-gradient: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+            --glass: rgba(255, 255, 255, 0.85);
+            --border: rgba(255, 255, 255, 0.3);
+            --shadow: 0 8px 32px 0 rgba(148, 163, 184, 0.15);
+            --text-main: #1e293b;
+            --text-muted: #64748b;
+        }
+
+        body {
+            font-family: 'Pretendard', sans-serif;
+            background: var(--bg-gradient);
+            background-attachment: fixed;
+            margin: 0;
+            padding: 40px 20px;
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            max-width: 900px;
+            width: 100%;
+            background: var(--glass);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            padding: 60px 50px;
+            border-radius: 40px;
+            box-shadow: var(--shadow);
+        }
+
+        /* Header Area */
+        .header {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        .header .badge {
+            display: inline-block;
+            background: #dbeafe;
+            color: var(--accent);
+            padding: 6px 18px;
+            border-radius: 50px;
+            font-size: 13px;
+            font-weight: 800;
+            margin-bottom: 20px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .header h1 {
+            color: var(--primary);
+            font-size: 40px;
+            margin: 0 0 12px 0;
+            font-weight: 800;
+            letter-spacing: -1.5px;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            font-size: 17px;
+            margin: 0;
+            line-height: 1.6;
+        }
+
+        /* Input Grid */
+        .input-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 25px;
+            margin-bottom: 40px;
+        }
+
+        .full-width {
+            grid-column: span 2;
+        }
+
+        .form-group {
+            position: relative;
+        }
+
+        label {
+            display: block;
+            font-weight: 700;
+            margin-bottom: 12px;
+            color: var(--primary);
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 18px 24px;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 18px;
+            font-size: 16px;
+            box-sizing: border-box;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: rgba(255, 255, 255, 0.6);
+            color: var(--text-main);
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            background: #fff;
+            box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.1);
+            transform: translateY(-2px);
+        }
+
+        /* Generate Button */
+        .btn-generate {
+            width: 100%;
+            padding: 22px;
+            background: linear-gradient(135deg, var(--accent), var(--primary));
+            color: #fff;
+            border: none;
+            border-radius: 20px;
+            font-size: 18px;
+            font-weight: 800;
+            cursor: pointer;
+            transition: all 0.4s ease;
+            box-shadow: 0 12px 24px rgba(37, 99, 235, 0.25);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .btn-generate:hover {
+            box-shadow: 0 18px 36px rgba(37, 99, 235, 0.35);
+            transform: translateY(-4px);
+            filter: brightness(1.1);
+        }
+
+        .btn-generate:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* Result Area */
+        .result-container {
+            margin-top: 60px;
+            padding-top: 40px;
+            border-top: 2px solid #f1f5f9;
+            position: relative;
+            display: none; /* Initially hidden */
+        }
+
+        .result-container.active {
+            display: block;
+            animation: fadeIn 0.8s ease forwards;
+        }
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .result-title {
+            font-weight: 800;
+            color: var(--primary);
+            font-size: 18px;
+        }
+
+        .stats {
+            display: flex;
+            gap: 20px;
+            font-size: 14px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .stats b { color: var(--accent); }
+
+        .textarea-wrapper {
+            position: relative;
+        }
+
+        textarea {
+            width: 100%;
+            height: 650px;
+            padding: 40px;
+            border: 1.5px solid #e2e8f0;
+            border-radius: 25px;
+            font-size: 16px;
+            line-height: 1.9;
+            resize: none;
+            box-sizing: border-box;
+            background: #fff;
+            color: #334155;
+            font-family: inherit;
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 12px 24px;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            border-radius: 12px;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            z-index: 10;
+        }
+
+        .copy-btn:hover { background: var(--accent); transform: scale(1.05); }
+
+        /* Loading Spinner */
+        .loading {
+            display: none;
+            text-align: center;
+            margin: 40px 0;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(37, 99, 235, 0.1);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            margin: 0 auto 20px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Key Input Area (Security) */
+        .settings-area {
+            margin-top: 50px;
+            padding: 30px;
+            background: rgba(241, 245, 249, 0.5);
+            border-radius: 20px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="header">
+            <span class="badge">Advanced Medical SEO AI</span>
+            <h1>전문의 블로그 마스터 v2.0</h1>
+            <p>네이버 <b>C-Rank</b>와 <b>D.I.A.+</b> 로직을 관통하는 고품질 원고를 생성합니다.</p>
+        </div>
+
+        <div class="input-grid">
+            <div class="form-group full-width">
+                <label for="title">📝 포스팅 주제/제목</label>
+                <input type="text" id="title" placeholder="환자들이 가장 궁금해할 만한 핵심 키워드를 포함해 작성하세요.">
+            </div>
+
+            <div class="form-group">
+                <label for="mainKeyword">🔑 메인 키워드 (상위노출)</label>
+                <input type="text" id="mainKeyword" placeholder="예: 유방촘음파비용, 갑상선결절수술">
+            </div>
+
+            <div class="form-group">
+                <label for="subKeywords">🏷️ 서브 키워드 (연관어)</label>
+                <input type="text" id="subKeywords" placeholder="콤마(,)로 구분해 여러 개 입력 가능">
+            </div>
+        </div>
+
+        <button class="btn-generate" id="generateBtn" onclick="generateBlog()">
+            <span>✨ 프리미엄 원고 생성하기</span>
+        </button>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p id="loadingMsg" style="color: var(--accent); font-weight: 700;">네이버 로직을 분석하며 초안을 작성 중입니다...</p>
+        </div>
+
+        <div class="result-container" id="resultContainer">
+            <div class="result-header">
+                <div class="result-title">📄 생성된 네이버 블로그 원고</div>
+                <div class="stats">
+                    <span id="charCount">공백 제외: <b>0</b>자</span>
+                    <span id="keywordDensity">키워드 반복: <b>0</b>회</span>
+                </div>
+            </div>
+            <div class="textarea-wrapper">
+                <button class="copy-btn" id="copyBtn" onclick="copyToClipboard()">전체 복사하기</button>
+                <textarea id="resultText" readonly></textarea>
+            </div>
+        </div>
+
+        <div class="settings-area">
+            <div class="form-group">
+                <label for="apiKey">🔐 Gemini API Key (Security)</label>
+                <input type="password" id="apiKey" value="AIzaSyBQ6yasYAHNyk006MaJS3lkZIAdHouiLUs" placeholder="개인 API 키를 여기에 입력하세요.">
+                <p style="font-size: 12px; color: var(--text-muted); margin-top: 8px;">* 입력된 키는 외부로 전송되지 않으며 브라우저 메모리에만 상주합니다.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const loadingStages = [
+            "네이버 D.I.A.+ 로직에 맞춰 실제 진료 경험을 구성 중입니다...",
+            "전문성을 보여주는 C-Rank 최적화 문구들을 삽입하고 있습니다...",
+            "환자들이 이탈하지 않도록 흥미로운 도입부를 설계 중입니다...",
+            "모바일 가독성을 위해 문단을 최적으로 나누는 중입니다...",
+            "SEO 패널티를 피하기 위해 중복 표현을 검수 중입니다..."
+        ];
+        let stageIndex = 0;
+
+        function rotateLoadingMsg() {
+            if (document.getElementById('loading').style.display === 'block') {
+                document.getElementById('loadingMsg').innerText = loadingStages[stageIndex];
+                stageIndex = (stageIndex + 1) % loadingStages.length;
+                setTimeout(rotateLoadingMsg, 3000);
+            }
+        }
+
+        async function generateBlog() {
+            const title = document.getElementById('title').value;
+            const mainKeyword = document.getElementById('mainKeyword').value;
+            const subKeywords = document.getElementById('subKeywords').value;
+            const API_KEY = document.getElementById('apiKey').value;
+
+            if (!title || !mainKeyword) {
+                alert("제목과 메인 키워드는 필수입니다.");
+                return;
+            }
+
+            const generateBtn = document.getElementById('generateBtn');
+            const loading = document.getElementById('loading');
+            const resultContainer = document.getElementById('resultContainer');
+            const resultText = document.getElementById('resultText');
+
+            generateBtn.disabled = true;
+            loading.style.display = 'block';
+            resultContainer.classList.remove('active');
+            rotateLoadingMsg();
+
+            const prompt = `당신은 유방외과/갑상선 분야의 신뢰받는 전문의이자 스타 블로거입니다. 
+대한민국의 네이버 블로그 검색 엔진 최적화(SEO) 가이드라인인 C-Rank와 D.I.A.+ 로직을 완벽히 준수하여 전문성과 경험이 돋보이는 글을 작성하세요.
+
+[입력 데이터]
+- 최종 목표 제목: ${title}
+- 메인 키워드: ${mainKeyword}
+- 서브 키워드: ${subKeywords}
+
+[네이버 SEO 최적화 규칙]
+1. **D.I.A.+ (경험 점수)**: 단순 정보 나열이 아닌, "오늘 진료실에 오신 분의 고충"이나 "직접 수술을 집도하며 느낀 점" 등 본인만의 독창적인 '경험 사례'를 도입부에 반드시 배치하세요.
+2. **C-Rank (신뢰 점수)**: 의학적 근거가 명확한 전문 지식을 포함하되, 환자가 이해하기 쉬운 비유와 평어체(~다)로 친절하게 설명하세요.
+3. **가독성 (UX)**: 마크다운 형식을 사용하여 소제목(###), 불렛 포인트, **굵게 효과**를 적절히 섞어 네이버 에디터에 붙여넣기 좋게 만드세요.
+4. **키워드 설계**: 메인 키워드는 서론/결론에 각 1회, 본문 내에는 5~8회 정도 문맥에 맞게 자연스럽게 반복하세요.
+5. **분량**: 공백 제외 최소 1,800자 이상의 매우 상세하고 풍부한 정보량을 제공하세요.
+6. **CTA**: 글 말미에 정기 검진의 중요성을 강조하고 병원 상담/문의를 유도하는 당위성 있는 메시지를 넣으세요.
+
+글자 수는 충분히 길게 가져가며, 가독성을 위해 한 문단은 3~4줄을 넘기지 마세요.`;
+
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${API_KEY}`;
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                });
+
+                const data = await response.json();
+                if (data.candidates && data.candidates[0].content) {
+                    const output = data.candidates[0].content.parts[0].text;
+                    resultText.value = output;
+                    
+                    // Update Stats
+                    const chars = output.replace(/\s/g, "").length;
+                    document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
+                    
+                    const keywords = (output.match(new RegExp(mainKeyword, 'g')) || []).length;
+                    document.getElementById('keywordDensity').innerHTML = `키워드 반복: <b>${keywords}</b>회`;
+                    
+                    resultContainer.classList.add('active');
+                    window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
+                } else {
+                    resultText.value = "원고 생성 중 오류가 발생했습니다. API 키를 다시 확인해주세요.";
+                }
+            } catch (e) {
+                resultText.value = "네트워크 오류: " + e.message;
+            } finally {
+                generateBtn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        function copyToClipboard() {
+            const text = document.getElementById('resultText');
+            text.select();
+            document.execCommand('copy');
+            
+            const btn = document.getElementById('copyBtn');
+            btn.innerText = "성공적으로 복사됨! ✨";
+            btn.style.background = "#10b981";
+            setTimeout(() => {
+                btn.innerText = "전체 복사하기";
+                btn.style.background = "var(--primary)";
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
