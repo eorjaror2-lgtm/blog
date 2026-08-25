@@ -312,6 +312,14 @@
             line-height: 1.6;
         }
 
+        .timing-summary {
+            display: none;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin: 0 0 20px 0;
+            line-height: 1.6;
+        }
+
         .evidence-status {
             display: none;
             font-size: 13px;
@@ -419,6 +427,21 @@
             font-family: inherit;
         }
 
+        .sources-more {
+            margin-top: 10px;
+        }
+
+        .sources-more summary {
+            cursor: pointer;
+            font-weight: 700;
+            color: var(--primary);
+            font-size: 13px;
+        }
+
+        .sources-more[open] summary {
+            margin-bottom: 8px;
+        }
+
         .result-disclaimer {
             font-size: 12px;
             color: var(--text-muted);
@@ -475,6 +498,7 @@
         <div class="loading" id="loading">
             <div class="spinner"></div>
             <p id="loadingMsg" style="color: var(--accent); font-weight: 700;">네이버 로직을 분석하며 초안을 작성 중입니다...</p>
+            <p id="elapsedTimer" style="color: var(--text-muted); font-size: 13px; margin-top: 8px;"></p>
         </div>
 
         <div class="result-container" id="resultContainer">
@@ -487,6 +511,7 @@
             </div>
             <div class="review-status" id="reviewStatus"></div>
             <div class="review-substatus" id="reviewSubstatus"></div>
+            <div class="timing-summary" id="timingSummary"></div>
             <div class="evidence-status" id="evidenceStatus"></div>
 
             <div class="textarea-wrapper">
@@ -505,8 +530,12 @@
             </div>
 
             <div class="sources-section" id="sourcesSection">
-                <h3>참고 근거 / 출처</h3>
+                <h3 id="sourcesHeading">참고 근거 / 출처</h3>
                 <div id="sourcesList"></div>
+                <details class="sources-more" id="sourcesMore">
+                    <summary id="sourcesMoreSummary">전체 출처 보기</summary>
+                    <div id="sourcesMoreList"></div>
+                </details>
             </div>
 
             <details class="research-details" id="researchDetails">
@@ -542,6 +571,91 @@
         let requestInFlight = false;
         let activeRequestId = 0; // guards against a slow/older request overwriting a newer one's result
 
+        // --- Phase 3B-1: elapsed-time UI (real elapsed time only — no fake
+        // percentage, no fake "almost done") ---
+        let elapsedTimerId = null;
+        let workflowStartTime = null;
+        let stepStartTime = null;
+
+        function formatDuration(ms) {
+            const totalSeconds = Math.max(0, Math.round(ms / 1000));
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
+        }
+
+        function updateElapsedDisplay() {
+            const el = document.getElementById('elapsedTimer');
+            if (!el || workflowStartTime === null) return;
+            const total = formatDuration(Date.now() - workflowStartTime);
+            const step = formatDuration(Date.now() - stepStartTime);
+            el.textContent = `경과 시간 ${total} (현재 단계 ${step})`;
+        }
+
+        function clearElapsedTimer() {
+            if (elapsedTimerId !== null) {
+                clearInterval(elapsedTimerId);
+                elapsedTimerId = null;
+            }
+        }
+
+        function startElapsedTimer() {
+            clearElapsedTimer();
+            updateElapsedDisplay();
+            elapsedTimerId = setInterval(updateElapsedDisplay, 1000);
+        }
+
+        function renderTimingSummary(step1Ms, step2Ms, totalMs) {
+            const el = document.getElementById('timingSummary');
+            el.textContent = `총 소요 ${formatDuration(totalMs)} · 근거조사·초안 ${formatDuration(step1Ms)} · 의학·사실 검토 ${formatDuration(step2Ms)}`;
+            el.style.display = 'block';
+        }
+
+        // Naver copy/display normalization — removes ONLY a Markdown ATX
+        // heading marker at the very start of a line ("#" .. "######" plus
+        // the required following space, up to 3 leading spaces per
+        // CommonMark). Never touches a '#' that isn't a line-leading
+        // heading marker, never rewrites numbers/parentheses/URLs/wording —
+        // the medical draft content itself is untouched.
+        function normalizeNaverPlainText(text) {
+            if (typeof text !== 'string') return text;
+            return text
+                .split('\n')
+                .map((line) => line.replace(/^ {0,3}#{1,6}(?=\s)\s*/, ''))
+                .join('\n')
+                .trim();
+        }
+
+        // Very conservative display-only cleanup for the research dossier:
+        // strips ONLY leading English search-intent chatter lines (and blank
+        // lines between them) from the very start of the document, and stops
+        // at the first line that doesn't match. Never scans past that point,
+        // so chatter appearing mid-document is never touched. The dossier
+        // sent to /api/finalize-evidence-draft (draftData.research) is never
+        // passed through this function — only the on-screen copy is.
+        const RESEARCH_CHATTER_LINE_PATTERNS = [
+            /^I'll search official sources.*$/i,
+            /^I will search.*$/i,
+            /^Let me search.*$/i,
+            /^I'll look for.*$/i,
+            /^I'm going to search.*$/i,
+            /^Let me look (up|for).*$/i,
+        ];
+
+        function sanitizeResearchForDisplay(research) {
+            if (typeof research !== 'string') return research;
+            const lines = research.split('\n');
+            let i = 0;
+            while (i < lines.length) {
+                const line = lines[i].trim();
+                if (line === '') { i++; continue; }
+                if (RESEARCH_CHATTER_LINE_PATTERNS.some((re) => re.test(line))) { i++; continue; }
+                break;
+            }
+            if (i === 0) return research;
+            return lines.slice(i).join('\n').replace(/^\n+/, '');
+        }
+
         function setLoadingMessage(msg) {
             document.getElementById('loadingMsg').innerText = msg;
         }
@@ -563,6 +677,12 @@
             reviewSubstatus.textContent = '';
             reviewSubstatus.style.display = 'none';
 
+            const timingSummary = document.getElementById('timingSummary');
+            timingSummary.textContent = '';
+            timingSummary.style.display = 'none';
+
+            document.getElementById('elapsedTimer').textContent = '';
+
             const evidenceStatus = document.getElementById('evidenceStatus');
             evidenceStatus.textContent = '';
             evidenceStatus.style.display = 'none';
@@ -574,7 +694,11 @@
             document.getElementById('warningCount').textContent = '';
             document.getElementById('warningsSection').style.display = 'none';
 
+            document.getElementById('sourcesHeading').textContent = '참고 근거 / 출처';
             document.getElementById('sourcesList').textContent = '';
+            document.getElementById('sourcesMoreList').textContent = '';
+            document.getElementById('sourcesMore').style.display = 'none';
+            document.getElementById('sourcesMore').removeAttribute('open');
             document.getElementById('sourcesSection').style.display = 'none';
 
             document.getElementById('researchText').textContent = '';
@@ -636,48 +760,80 @@
             }
         }
 
-        // Renders research sources as safe DOM nodes. Only absolute http(s)
+        // Default number of sources shown before "전체 출처 N개 보기". Server
+        // order/count is preserved exactly — this only changes what's
+        // visible by default, never which sources exist or their order.
+        const SOURCES_DEFAULT_VISIBLE = 5;
+
+        // Builds one source link as a safe DOM node. Only absolute http(s)
         // URLs become links (target=_blank + rel=noopener noreferrer);
         // anything else is silently skipped rather than guessed at.
+        function createSourceItem(source, hostname) {
+            const item = document.createElement('a');
+            item.className = 'source-item';
+            item.href = source.url;
+            item.target = '_blank';
+            item.rel = 'noopener noreferrer';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.textContent = (typeof source.title === 'string' && source.title.trim()) ? source.title : hostname;
+            item.appendChild(titleDiv);
+
+            const hostDiv = document.createElement('div');
+            hostDiv.className = 'source-host';
+            hostDiv.textContent = hostname;
+            item.appendChild(hostDiv);
+
+            return item;
+        }
+
+        // Renders research sources: first SOURCES_DEFAULT_VISIBLE always
+        // shown, any remainder tucked behind a native <details> disclosure.
         function renderSources(sources) {
             const sourcesSection = document.getElementById('sourcesSection');
+            const sourcesHeading = document.getElementById('sourcesHeading');
             const sourcesList = document.getElementById('sourcesList');
+            const sourcesMore = document.getElementById('sourcesMore');
+            const sourcesMoreList = document.getElementById('sourcesMoreList');
+            const sourcesMoreSummary = document.getElementById('sourcesMoreSummary');
             sourcesList.textContent = '';
+            sourcesMoreList.textContent = '';
+            sourcesMore.style.display = 'none';
+            sourcesMore.removeAttribute('open');
 
             if (!Array.isArray(sources)) return;
 
+            const valid = [];
             sources.forEach((source) => {
                 if (!source || typeof source.url !== 'string') return;
                 if (!/^https?:\/\//.test(source.url)) return;
-
                 let hostname;
                 try {
                     hostname = new URL(source.url).hostname;
                 } catch (e) {
                     return;
                 }
-
-                const item = document.createElement('a');
-                item.className = 'source-item';
-                item.href = source.url;
-                item.target = '_blank';
-                item.rel = 'noopener noreferrer';
-
-                const titleDiv = document.createElement('div');
-                titleDiv.textContent = (typeof source.title === 'string' && source.title.trim()) ? source.title : hostname;
-                item.appendChild(titleDiv);
-
-                const hostDiv = document.createElement('div');
-                hostDiv.className = 'source-host';
-                hostDiv.textContent = hostname;
-                item.appendChild(hostDiv);
-
-                sourcesList.appendChild(item);
+                valid.push({ source, hostname });
             });
 
-            if (sourcesList.children.length > 0) {
-                sourcesSection.style.display = 'block';
+            if (valid.length === 0) return;
+
+            sourcesHeading.textContent = `참고 근거 / 출처 ${valid.length}개`;
+
+            valid.slice(0, SOURCES_DEFAULT_VISIBLE).forEach(({ source, hostname }) => {
+                sourcesList.appendChild(createSourceItem(source, hostname));
+            });
+
+            const rest = valid.slice(SOURCES_DEFAULT_VISIBLE);
+            if (rest.length > 0) {
+                rest.forEach(({ source, hostname }) => {
+                    sourcesMoreList.appendChild(createSourceItem(source, hostname));
+                });
+                sourcesMoreSummary.textContent = `전체 출처 ${valid.length}개 보기`;
+                sourcesMore.style.display = 'block';
             }
+
+            sourcesSection.style.display = 'block';
         }
 
         function renderReviewStatus(workflow) {
@@ -733,10 +889,16 @@
             generateBtn.disabled = true;
             resetResultDisplay();
             loading.style.display = 'block';
+
+            workflowStartTime = Date.now();
+            stepStartTime = workflowStartTime;
+            startElapsedTimer();
             setLoadingMessage('의학 근거를 조사하고 초안을 작성하고 있습니다...');
 
             try {
                 // --- STEP 1: research + evidence-grounded draft ---
+                const step1StartTime = Date.now();
+                stepStartTime = step1StartTime;
                 const draftResponse = await fetch('/api/generate-evidence-draft', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -746,10 +908,16 @@
                 if (requestId !== activeRequestId) return; // superseded by a newer request
 
                 if (!draftResponse.ok) {
-                    throw new Error(draftData.error || "근거 조사 또는 초안 생성 중 오류가 발생했습니다.");
+                    const message = draftResponse.status === 504
+                        ? "요청 시간이 오래 걸려 중단되었습니다. 다시 시도해 주세요."
+                        : (draftData.error || "근거 조사 또는 초안 생성 중 오류가 발생했습니다.");
+                    throw new Error(message);
                 }
+                const step1ElapsedMs = Date.now() - step1StartTime;
 
                 // --- STEP 2: bounded medical/fact review + repair + final review ---
+                const step2StartTime = Date.now();
+                stepStartTime = step2StartTime;
                 setLoadingMessage('의학적 사실과 근거를 검토하고 있습니다...');
 
                 const finalizeResponse = await fetch('/api/finalize-evidence-draft', {
@@ -769,27 +937,36 @@
                     // A draft exists at this point, but it was never reviewed
                     // to completion — it must never be shown or copyable as
                     // if it were the reviewed final result. Fail closed.
-                    throw new Error("초안은 생성되었지만 " + (finalizeData.error || "의학적 사실 검토 중 오류가 발생했습니다."));
+                    const message = finalizeResponse.status === 504
+                        ? "요청 시간이 오래 걸려 중단되었습니다. 다시 시도해 주세요."
+                        : ("초안은 생성되었지만 " + (finalizeData.error || "의학적 사실 검토 중 오류가 발생했습니다."));
+                    throw new Error(message);
                 }
+                const step2ElapsedMs = Date.now() - step2StartTime;
 
                 // The displayed/copyable text is always the finalize step's
-                // plainText (post-review, post-repair-if-any) — never STEP 1's.
-                resultText.value = finalizeData.plainText;
+                // plainText (post-review, post-repair-if-any) — never STEP 1's
+                // — run through the same Naver heading-marker normalization
+                // so what the user sees and what "전체 복사하기" copies match
+                // exactly. The medical content itself is not touched.
+                const normalizedPlainText = normalizeNaverPlainText(finalizeData.plainText);
+                resultText.value = normalizedPlainText;
 
-                const chars = finalizeData.plainText.replace(/\s/g, "").length;
+                const chars = normalizedPlainText.replace(/\s/g, "").length;
                 document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
 
                 const escapedKeyword = targetKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const keywordHits = (finalizeData.plainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
+                const keywordHits = (normalizedPlainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
                 document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>${keywordHits}</b>회`;
 
                 renderReviewStatus(finalizeData.workflow);
+                renderTimingSummary(step1ElapsedMs, step2ElapsedMs, step1ElapsedMs + step2ElapsedMs);
                 renderEvidenceStatus(draftData.evidence);
                 renderIssues(finalizeData.finalReview ? finalizeData.finalReview.issues : []);
                 renderSources(draftData.sources);
 
                 if (typeof draftData.research === 'string' && draftData.research.trim()) {
-                    document.getElementById('researchText').textContent = draftData.research;
+                    document.getElementById('researchText').textContent = sanitizeResearchForDisplay(draftData.research);
                     document.getElementById('researchDetails').style.display = 'block';
                 }
 
@@ -804,6 +981,7 @@
                     requestInFlight = false;
                     generateBtn.disabled = false;
                     loading.style.display = 'none';
+                    clearElapsedTimer();
                     resultContainer.classList.add('active'); // 항상 보여줌 (오류 메시지 포함)
                     window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
                 }

@@ -87,6 +87,24 @@ const TIER2_RESEARCH_ALLOWED_DOMAINS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Perf instrumentation (Phase 3B-1) — structural timing only. Never logs
+// topic, draft/research/review content, source URLs, or the API key; only
+// a phase name, elapsed ms, and small numeric/boolean metadata (attempt
+// number, blocking count, tier2Used, repaired). Purely additive — does not
+// change any throw/catch/status/code behavior anywhere it is used.
+// ---------------------------------------------------------------------------
+
+function logPerf(phase, ms, extra) {
+  let line = `[perf] ${phase} ms=${ms}`;
+  if (extra) {
+    for (const key of Object.keys(extra)) {
+      line += ` ${key}=${extra[key]}`;
+    }
+  }
+  console.log(line);
+}
+
+// ---------------------------------------------------------------------------
 // Claude client (lazy + cached; never crashes the server if config is missing)
 // ---------------------------------------------------------------------------
 
@@ -1028,13 +1046,19 @@ const MAX_TIER1_POLICY_ATTEMPTS = 2; // 최초 1회 + policy violation 시 재�
 async function runTier1WithPolicyRetry(client, value) {
   let lastDisallowedHosts = [];
   for (let attempt = 1; attempt <= MAX_TIER1_POLICY_ATTEMPTS; attempt++) {
-    const result = await runWebSearchStage(client, {
-      system: TIER1_SYSTEM_PROMPT,
-      userContent: buildTier1UserMessage(value),
-      allowedDomains: TIER1_RESEARCH_ALLOWED_DOMAINS,
-      maxUses: MAX_TIER1_SEARCHES,
-      tier: 1,
-    });
+    const attemptStart = Date.now();
+    let result;
+    try {
+      result = await runWebSearchStage(client, {
+        system: TIER1_SYSTEM_PROMPT,
+        userContent: buildTier1UserMessage(value),
+        allowedDomains: TIER1_RESEARCH_ALLOWED_DOMAINS,
+        maxUses: MAX_TIER1_SEARCHES,
+        tier: 1,
+      });
+    } finally {
+      logPerf("research tier1", Date.now() - attemptStart, { attempt });
+    }
     if (!result.disallowedHosts.length) {
       return { ok: true, result };
     }
@@ -1081,22 +1105,28 @@ async function runResearchPipeline(client, value) {
   }
 
   // --- Step 2: Evidence assessment (no web search, no new facts) ---
-  const assessmentMessage = await client.messages.parse({
-    model: MODEL,
-    max_tokens: MAX_OUTPUT_TOKENS,
-    system: EVIDENCE_ASSESSMENT_SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: buildEvidenceAssessmentUserMessage({
-          topic: value.topic,
-          targetKeyword: value.targetKeyword,
-          tier1Research: tier1.research,
-        }),
-      },
-    ],
-    output_config: { format: zodOutputFormat(EvidenceAssessmentSchema) },
-  });
+  const assessmentStart = Date.now();
+  let assessmentMessage;
+  try {
+    assessmentMessage = await client.messages.parse({
+      model: MODEL,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      system: EVIDENCE_ASSESSMENT_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: buildEvidenceAssessmentUserMessage({
+            topic: value.topic,
+            targetKeyword: value.targetKeyword,
+            tier1Research: tier1.research,
+          }),
+        },
+      ],
+      output_config: { format: zodOutputFormat(EvidenceAssessmentSchema) },
+    });
+  } finally {
+    logPerf("evidence assessment", Date.now() - assessmentStart);
+  }
 
   const assessment = assessmentMessage.parsed_output;
   // Defense-in-depth: the prompt already instructs at most 3 essential
@@ -1141,6 +1171,7 @@ async function runResearchPipeline(client, value) {
 
   // --- Step 3: Tier 2 (supporting literature), only the missing questions ---
   let tier2;
+  const tier2Start = Date.now();
   try {
     tier2 = await runWebSearchStage(client, {
       system: TIER2_SYSTEM_PROMPT,
@@ -1163,6 +1194,8 @@ async function runResearchPipeline(client, value) {
         code: "RESEARCH_TIER2_FAILED",
       },
     };
+  } finally {
+    logPerf("research tier2", Date.now() - tier2Start);
   }
 
   if (tier2.disallowedHosts.length) {
@@ -1632,11 +1665,19 @@ async function handleGenerateEvidenceDraft(req, res) {
     return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요." });
   }
 
+  // Wraps both stages (research + draft) in a single outer try/finally so
+  // "generate evidence draft total" is logged exactly once per request, on
+  // every exit path (success, research failure, or draft failure) — never
+  // duplicated between stages.
+  const generateEvidenceDraftTotalStart = Date.now();
+  let tier2UsedForPerfLog = false;
+  try {
   let research;
   try {
     const result = await runResearchPipeline(researchClient, value);
     if (!result.ok) return sendJson(res, result.status, result.body);
     research = result;
+    tier2UsedForPerfLog = !!research.evidence?.tier2Used;
   } catch (err) {
     const { status, body: errBody } = researchErrorResponse(err);
     return sendJson(res, status, errBody);
@@ -1646,13 +1687,19 @@ async function handleGenerateEvidenceDraft(req, res) {
   // grounded only in the research dossier just produced. No web_search tool
   // is attached here — this call must not re-research or re-assess evidence. ---
   try {
-    const message = await draftClient.messages.parse({
-      model: MODEL,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      system: EVIDENCE_DRAFT_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: buildEvidenceDraftUserMessage(value, research.research) }],
-      output_config: { format: zodOutputFormat(DraftSchema) },
-    });
+    const draftGenerationStart = Date.now();
+    let message;
+    try {
+      message = await draftClient.messages.parse({
+        model: MODEL,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        system: EVIDENCE_DRAFT_SYSTEM_PROMPT,
+        messages: [{ role: "user", content: buildEvidenceDraftUserMessage(value, research.research) }],
+        output_config: { format: zodOutputFormat(DraftSchema) },
+      });
+    } finally {
+      logPerf("evidence draft generation", Date.now() - draftGenerationStart);
+    }
 
     if (!message.parsed_output) {
       console.error("[server] Evidence draft response failed schema parsing. stop_reason:", message.stop_reason);
@@ -1723,6 +1770,9 @@ async function handleGenerateEvidenceDraft(req, res) {
     }
     console.error("[server] Unexpected error:", err);
     return sendJson(res, 500, { error: "예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_GENERATION_FAILED" });
+  }
+  } finally {
+    logPerf("generate evidence draft total", Date.now() - generateEvidenceDraftTotalStart, { tier2Used: tier2UsedForPerfLog });
   }
 }
 
@@ -2018,8 +2068,14 @@ async function handleFinalizeEvidenceDraft(req, res) {
     return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요." });
   }
 
+  // Single outer try/finally around every step so "finalize total" logs
+  // exactly once per request on every exit path (1-call or 3-call), never
+  // duplicated between steps.
+  const finalizeTotalStart = Date.now();
+  try {
   // --- STEP 1: initial review (exactly 1 call) ---
   let initialReview;
+  const initialReviewStart = Date.now();
   try {
     const result = await runEvidenceDraftReview(client, value);
     if (!result.ok) return sendJson(res, result.status, result.body);
@@ -2027,6 +2083,8 @@ async function handleFinalizeEvidenceDraft(req, res) {
   } catch (err) {
     const { status, body: errBody } = evidenceDraftReviewErrorResponse(err);
     return sendJson(res, status, errBody);
+  } finally {
+    logPerf("finalize initial review", Date.now() - initialReviewStart);
   }
 
   const initialBlockingCount = initialReview.issues.filter((issue) => issue.severity === "blocking").length;
@@ -2054,6 +2112,7 @@ async function handleFinalizeEvidenceDraft(req, res) {
 
   // --- STEP 2: repair (exactly 1 call, only reached when blocking > 0) ---
   let repaired;
+  const repairStart = Date.now();
   try {
     const result = await runEvidenceDraftRepair(client, { topic: value.topic, draft: value.draft, research: value.research, evidence: value.evidence, review: initialReview });
     if (!result.ok) return sendJson(res, result.status, result.body);
@@ -2061,6 +2120,8 @@ async function handleFinalizeEvidenceDraft(req, res) {
   } catch (err) {
     const { status, body: errBody } = evidenceDraftRepairErrorResponse(err);
     return sendJson(res, status, errBody);
+  } finally {
+    logPerf("finalize repair", Date.now() - repairStart);
   }
   console.log("[server] evidence finalize: repaired=true");
 
@@ -2068,6 +2129,7 @@ async function handleFinalizeEvidenceDraft(req, res) {
   // comes back — 0 or not — this function returns here; there is no code
   // path back to STEP 2 for a second repair. ---
   let finalReview;
+  const finalReviewStart = Date.now();
   try {
     const result = await runEvidenceDraftReview(client, { topic: value.topic, draft: repaired.draft, research: value.research, evidence: value.evidence });
     if (!result.ok) return sendJson(res, result.status, result.body);
@@ -2075,6 +2137,8 @@ async function handleFinalizeEvidenceDraft(req, res) {
   } catch (err) {
     const { status, body: errBody } = evidenceDraftReviewErrorResponse(err);
     return sendJson(res, status, errBody);
+  } finally {
+    logPerf("finalize final review", Date.now() - finalReviewStart);
   }
 
   const finalBlockingCount = finalReview.issues.filter((issue) => issue.severity === "blocking").length;
@@ -2097,6 +2161,9 @@ async function handleFinalizeEvidenceDraft(req, res) {
     initialReview,
     finalReview,
   });
+  } finally {
+    logPerf("finalize total", Date.now() - finalizeTotalStart);
+  }
 }
 
 async function serveStatic(req, res) {
