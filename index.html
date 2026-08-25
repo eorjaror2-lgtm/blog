@@ -277,6 +277,161 @@
         }
 
         @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Medical/fact review status */
+        .review-status {
+            padding: 16px 20px;
+            border-radius: 16px;
+            margin-bottom: 12px;
+            font-weight: 800;
+            font-size: 15px;
+            display: none;
+            align-items: center;
+            gap: 10px;
+            line-height: 1.5;
+        }
+
+        .review-status.pass {
+            background: #dcfce7;
+            color: #15803d;
+            border: 1px solid rgba(21, 128, 61, 0.2);
+        }
+
+        .review-status.blocked {
+            background: #fee2e2;
+            color: #b91c1c;
+            border: 1px solid rgba(185, 28, 28, 0.25);
+        }
+
+        .review-substatus {
+            display: none;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin: 0 0 20px 0;
+            line-height: 1.6;
+        }
+
+        .evidence-status {
+            display: none;
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 24px;
+        }
+
+        /* Warning / blocking issue cards */
+        .issue-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .issue-section h3 {
+            font-size: 15px;
+            color: var(--primary);
+            margin: 0 0 12px 0;
+        }
+
+        .issue-card {
+            background: rgba(255, 255, 255, 0.6);
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .issue-card.blocking {
+            border-color: rgba(220, 38, 38, 0.3);
+            background: rgba(254, 226, 226, 0.4);
+        }
+
+        .issue-card .issue-excerpt {
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 6px;
+        }
+
+        .issue-card .issue-meta {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        /* Sources */
+        .sources-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .sources-section h3 {
+            font-size: 15px;
+            color: var(--primary);
+            margin: 0 0 12px 0;
+        }
+
+        .source-item {
+            display: block;
+            padding: 10px 14px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.6);
+            border: 1px solid #e2e8f0;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: var(--text-main);
+            text-decoration: none;
+        }
+
+        .source-item:hover {
+            border-color: var(--accent);
+        }
+
+        .source-item .source-host {
+            color: var(--text-muted);
+            font-size: 12px;
+            margin-top: 2px;
+        }
+
+        /* Research dossier (collapsed by default) */
+        .research-details {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .research-details summary {
+            cursor: pointer;
+            font-weight: 700;
+            color: var(--primary);
+            font-size: 14px;
+        }
+
+        .research-details pre {
+            white-space: pre-wrap;
+            font-size: 13px;
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.6);
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            padding: 16px;
+            margin-top: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: inherit;
+        }
+
+        .result-disclaimer {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 24px;
+            text-align: center;
+        }
+
+        .copy-btn:disabled {
+            background: #cbd5e1;
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
     </style>
 </head>
 
@@ -330,34 +485,230 @@
                     <span id="keywordDensity">키워드 등장: <b>0</b>회</span>
                 </div>
             </div>
+            <div class="review-status" id="reviewStatus"></div>
+            <div class="review-substatus" id="reviewSubstatus"></div>
+            <div class="evidence-status" id="evidenceStatus"></div>
+
             <div class="textarea-wrapper">
                 <button class="copy-btn" id="copyBtn" onclick="copyToClipboard()">전체 복사하기</button>
                 <textarea id="resultText" readonly></textarea>
             </div>
+
+            <div class="issue-section" id="blockingSection">
+                <h3>⚠️ 검토에서 발견된 차단 항목</h3>
+                <div id="blockingList"></div>
+            </div>
+
+            <div class="issue-section" id="warningsSection">
+                <h3>참고 검토사항 <span id="warningCount"></span></h3>
+                <div id="warningList"></div>
+            </div>
+
+            <div class="sources-section" id="sourcesSection">
+                <h3>참고 근거 / 출처</h3>
+                <div id="sourcesList"></div>
+            </div>
+
+            <details class="research-details" id="researchDetails">
+                <summary>근거 조사 내용 보기</summary>
+                <pre id="researchText"></pre>
+            </details>
+
+            <p class="result-disclaimer">AI 기반 근거·사실 검토 결과이며, 최종 게시 전 의료인의 확인이 필요합니다.</p>
         </div>
 
         <p class="server-note">Claude API는 서버에서 안전하게 연결됩니다.</p>
     </div>
 
     <script>
-        const loadingStages = [
-            "네이버 D.I.A.+ 로직에 맞춰 실제 진료 경험을 구성 중입니다...",
-            "전문성을 보여주는 C-Rank 최적화 문구들을 삽입하고 있습니다...",
-            "환자들이 이탈하지 않도록 흥미로운 도입부를 설계 중입니다...",
-            "모바일 가독성을 위해 문단을 최적으로 나누는 중입니다...",
-            "SEO 패널티를 피하기 위해 중복 표현을 검수 중입니다..."
-        ];
-        let stageIndex = 0;
+        // Category/action labels shown to the user for reviewer issues.
+        // Purely a Korean display mapping — the authoritative category and
+        // action values always come straight from the server response.
+        const ISSUE_CATEGORY_LABELS = {
+            unsupported_claim: '근거 없는 주장',
+            uncertainty_violation: '불확실성 표현 오류',
+            evidence_strength_overstatement: '근거 강도 과장',
+            overgeneralization: '과잉 일반화',
+            unsupported_inference: '근거 없는 추론',
+            topic_relevance: '주제 관련성',
+        };
+        const ISSUE_ACTION_LABELS = {
+            remove: '삭제 권장',
+            soften: '표현 완화 권장',
+            clarify: '명확화 권장',
+            keep_but_reduce: '축소 권장',
+        };
 
-        function rotateLoadingMsg() {
-            if (document.getElementById('loading').style.display === 'block') {
-                document.getElementById('loadingMsg').innerText = loadingStages[stageIndex];
-                stageIndex = (stageIndex + 1) % loadingStages.length;
-                setTimeout(rotateLoadingMsg, 3000);
+        let requestInFlight = false;
+        let activeRequestId = 0; // guards against a slow/older request overwriting a newer one's result
+
+        function setLoadingMessage(msg) {
+            document.getElementById('loadingMsg').innerText = msg;
+        }
+
+        // Clears every dynamic result field so a new request never mixes
+        // its output with a previous run's draft/status/warnings/sources.
+        function resetResultDisplay() {
+            document.getElementById('resultContainer').classList.remove('active');
+            document.getElementById('resultText').value = '';
+            document.getElementById('charCount').innerHTML = `공백 제외: <b>0</b>자`;
+            document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>0</b>회`;
+
+            const reviewStatus = document.getElementById('reviewStatus');
+            reviewStatus.className = 'review-status';
+            reviewStatus.textContent = '';
+            reviewStatus.style.display = 'none';
+
+            const reviewSubstatus = document.getElementById('reviewSubstatus');
+            reviewSubstatus.textContent = '';
+            reviewSubstatus.style.display = 'none';
+
+            const evidenceStatus = document.getElementById('evidenceStatus');
+            evidenceStatus.textContent = '';
+            evidenceStatus.style.display = 'none';
+
+            document.getElementById('blockingList').textContent = '';
+            document.getElementById('blockingSection').style.display = 'none';
+
+            document.getElementById('warningList').textContent = '';
+            document.getElementById('warningCount').textContent = '';
+            document.getElementById('warningsSection').style.display = 'none';
+
+            document.getElementById('sourcesList').textContent = '';
+            document.getElementById('sourcesSection').style.display = 'none';
+
+            document.getElementById('researchText').textContent = '';
+            document.getElementById('researchDetails').style.display = 'none';
+            document.getElementById('researchDetails').removeAttribute('open');
+
+            document.getElementById('copyBtn').disabled = true;
+        }
+
+        // Builds one issue card via safe DOM/textContent only — draftExcerpt/
+        // reason are server-controlled review output, but are still treated
+        // as untrusted text and never passed through innerHTML.
+        function createIssueCard(issue, isBlocking) {
+            const card = document.createElement('div');
+            card.className = 'issue-card' + (isBlocking ? ' blocking' : '');
+
+            const excerpt = document.createElement('div');
+            excerpt.className = 'issue-excerpt';
+            excerpt.textContent = typeof issue.draftExcerpt === 'string' ? issue.draftExcerpt : '';
+            card.appendChild(excerpt);
+
+            const reason = document.createElement('div');
+            reason.textContent = typeof issue.reason === 'string' ? issue.reason : '';
+            card.appendChild(reason);
+
+            const meta = document.createElement('div');
+            meta.className = 'issue-meta';
+            const categoryText = ISSUE_CATEGORY_LABELS[issue.category] || issue.category || '';
+            const actionText = ISSUE_ACTION_LABELS[issue.recommendedAction] || issue.recommendedAction || '';
+            meta.textContent = [categoryText, actionText].filter(Boolean).join(' · ');
+            card.appendChild(meta);
+
+            return card;
+        }
+
+        // finalReview.issues is the single source of truth for both the
+        // blocking and warning sections — never initialReview, since the
+        // final verdict is what determines medicalFactReady.
+        function renderIssues(issues) {
+            const list = Array.isArray(issues) ? issues : [];
+            const blocking = list.filter((i) => i && i.severity === 'blocking');
+            const warnings = list.filter((i) => i && i.severity === 'warning');
+
+            const blockingSection = document.getElementById('blockingSection');
+            const blockingList = document.getElementById('blockingList');
+            blockingList.textContent = '';
+            if (blocking.length > 0) {
+                blocking.forEach((issue) => blockingList.appendChild(createIssueCard(issue, true)));
+                blockingSection.style.display = 'block';
+            }
+
+            const warningsSection = document.getElementById('warningsSection');
+            const warningList = document.getElementById('warningList');
+            document.getElementById('warningCount').textContent = warnings.length > 0 ? `${warnings.length}건` : '';
+            warningList.textContent = '';
+            if (warnings.length > 0) {
+                warnings.forEach((issue) => warningList.appendChild(createIssueCard(issue, false)));
+                warningsSection.style.display = 'block';
             }
         }
 
-        let requestInFlight = false;
+        // Renders research sources as safe DOM nodes. Only absolute http(s)
+        // URLs become links (target=_blank + rel=noopener noreferrer);
+        // anything else is silently skipped rather than guessed at.
+        function renderSources(sources) {
+            const sourcesSection = document.getElementById('sourcesSection');
+            const sourcesList = document.getElementById('sourcesList');
+            sourcesList.textContent = '';
+
+            if (!Array.isArray(sources)) return;
+
+            sources.forEach((source) => {
+                if (!source || typeof source.url !== 'string') return;
+                if (!/^https?:\/\//.test(source.url)) return;
+
+                let hostname;
+                try {
+                    hostname = new URL(source.url).hostname;
+                } catch (e) {
+                    return;
+                }
+
+                const item = document.createElement('a');
+                item.className = 'source-item';
+                item.href = source.url;
+                item.target = '_blank';
+                item.rel = 'noopener noreferrer';
+
+                const titleDiv = document.createElement('div');
+                titleDiv.textContent = (typeof source.title === 'string' && source.title.trim()) ? source.title : hostname;
+                item.appendChild(titleDiv);
+
+                const hostDiv = document.createElement('div');
+                hostDiv.className = 'source-host';
+                hostDiv.textContent = hostname;
+                item.appendChild(hostDiv);
+
+                sourcesList.appendChild(item);
+            });
+
+            if (sourcesList.children.length > 0) {
+                sourcesSection.style.display = 'block';
+            }
+        }
+
+        function renderReviewStatus(workflow) {
+            const reviewStatus = document.getElementById('reviewStatus');
+            const reviewSubstatus = document.getElementById('reviewSubstatus');
+
+            if (workflow.medicalFactReady) {
+                reviewStatus.className = 'review-status pass';
+                reviewStatus.textContent = '✅ 의학·사실 검토 통과';
+            } else {
+                reviewStatus.className = 'review-status blocked';
+                reviewStatus.textContent = '⚠️ 의학·사실 검토에서 수정이 필요한 항목이 남아 있습니다. 이 상태의 글은 게시용으로 사용하지 마세요.';
+            }
+            reviewStatus.style.display = 'flex';
+
+            if (workflow.repaired) {
+                reviewSubstatus.textContent =
+                    `초기 검토에서 근거상 수정이 필요한 표현이 발견되어(차단 항목 ${workflow.initialBlockingCount}건) 1회 자동 수정 후 다시 검토했습니다. (수정 후 차단 항목 ${workflow.finalBlockingCount}건)`;
+            } else {
+                reviewSubstatus.textContent = '수정이 필요한 중대한 근거 문제는 발견되지 않았습니다.';
+            }
+            reviewSubstatus.style.display = 'block';
+        }
+
+        function renderEvidenceStatus(evidence) {
+            const evidenceStatus = document.getElementById('evidenceStatus');
+            evidenceStatus.textContent = evidence && evidence.tier2Used
+                ? '📚 공식·1차 근거 + 보완 의학 문헌을 함께 사용해 작성했습니다.'
+                : '📚 공식·1차 근거를 우선으로 작성했습니다.';
+            evidenceStatus.style.display = 'block';
+        }
 
         async function generateBlog() {
             if (requestInFlight) return; // guard against double submit
@@ -372,6 +723,7 @@
                 return;
             }
 
+            const requestId = ++activeRequestId;
             const generateBtn = document.getElementById('generateBtn');
             const loading = document.getElementById('loading');
             const resultContainer = document.getElementById('resultContainer');
@@ -379,46 +731,90 @@
 
             requestInFlight = true;
             generateBtn.disabled = true;
+            resetResultDisplay();
             loading.style.display = 'block';
-            resultContainer.classList.remove('active');
-            rotateLoadingMsg();
+            setLoadingMessage('의학 근거를 조사하고 초안을 작성하고 있습니다...');
 
             try {
-                const response = await fetch('/api/generate-draft', {
+                // --- STEP 1: research + evidence-grounded draft ---
+                const draftResponse = await fetch('/api/generate-evidence-draft', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ topic, targetKeyword, subKeywords, optionalNotes })
                 });
+                const draftData = await draftResponse.json();
+                if (requestId !== activeRequestId) return; // superseded by a newer request
 
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || "초안 생성 중 오류가 발생했습니다.");
+                if (!draftResponse.ok) {
+                    throw new Error(draftData.error || "근거 조사 또는 초안 생성 중 오류가 발생했습니다.");
                 }
 
-                resultText.value = data.plainText;
+                // --- STEP 2: bounded medical/fact review + repair + final review ---
+                setLoadingMessage('의학적 사실과 근거를 검토하고 있습니다...');
 
-                const chars = data.plainText.replace(/\s/g, "").length;
+                const finalizeResponse = await fetch('/api/finalize-evidence-draft', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        topic,
+                        draft: draftData.draft,
+                        research: draftData.research,
+                        evidence: draftData.evidence
+                    })
+                });
+                const finalizeData = await finalizeResponse.json();
+                if (requestId !== activeRequestId) return;
+
+                if (!finalizeResponse.ok) {
+                    // A draft exists at this point, but it was never reviewed
+                    // to completion — it must never be shown or copyable as
+                    // if it were the reviewed final result. Fail closed.
+                    throw new Error("초안은 생성되었지만 " + (finalizeData.error || "의학적 사실 검토 중 오류가 발생했습니다."));
+                }
+
+                // The displayed/copyable text is always the finalize step's
+                // plainText (post-review, post-repair-if-any) — never STEP 1's.
+                resultText.value = finalizeData.plainText;
+
+                const chars = finalizeData.plainText.replace(/\s/g, "").length;
                 document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
 
                 const escapedKeyword = targetKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const keywordHits = (data.plainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
+                const keywordHits = (finalizeData.plainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
                 document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>${keywordHits}</b>회`;
+
+                renderReviewStatus(finalizeData.workflow);
+                renderEvidenceStatus(draftData.evidence);
+                renderIssues(finalizeData.finalReview ? finalizeData.finalReview.issues : []);
+                renderSources(draftData.sources);
+
+                if (typeof draftData.research === 'string' && draftData.research.trim()) {
+                    document.getElementById('researchText').textContent = draftData.research;
+                    document.getElementById('researchDetails').style.display = 'block';
+                }
+
+                document.getElementById('copyBtn').disabled = !finalizeData.workflow.medicalFactReady;
             } catch (e) {
+                if (requestId !== activeRequestId) return;
                 resultText.value = "❌ 오류 발생: " + e.message;
+                document.getElementById('copyBtn').disabled = true;
                 console.error(e);
             } finally {
-                requestInFlight = false;
-                generateBtn.disabled = false;
-                loading.style.display = 'none';
-                resultContainer.classList.add('active'); // 항상 보여줌 (오류 메시지 포함)
-                window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
+                if (requestId === activeRequestId) {
+                    requestInFlight = false;
+                    generateBtn.disabled = false;
+                    loading.style.display = 'none';
+                    resultContainer.classList.add('active'); // 항상 보여줌 (오류 메시지 포함)
+                    window.scrollTo({ top: resultContainer.offsetTop - 50, behavior: 'smooth' });
+                }
             }
         }
 
         async function copyToClipboard() {
-            const text = document.getElementById('resultText');
             const btn = document.getElementById('copyBtn');
+            if (btn.disabled) return;
+
+            const text = document.getElementById('resultText');
 
             try {
                 await navigator.clipboard.writeText(text.value);
