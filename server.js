@@ -42,6 +42,11 @@ const MAX_EVIDENCE_DRAFT_REVIEW_BODY_BYTES = 128 * 1024; // 131072 bytes
 // reusing/renaming MAX_EVIDENCE_DRAFT_REVIEW_BODY_BYTES, so the review
 // endpoint's own constant is never touched by this change.
 const MAX_EVIDENCE_DRAFT_REPAIR_BODY_BYTES = 128 * 1024; // 131072 bytes
+// /api/finalize-evidence-draft only — same reasoning again (draft +
+// research dossier + evidence metadata in the body). Its own constant, so
+// neither MAX_EVIDENCE_DRAFT_REVIEW_BODY_BYTES nor
+// MAX_EVIDENCE_DRAFT_REPAIR_BODY_BYTES is touched by this change.
+const MAX_EVIDENCE_DRAFT_FINALIZE_BODY_BYTES = 128 * 1024; // 131072 bytes
 
 const LIMITS = {
   topic: 200,
@@ -1375,6 +1380,57 @@ function validateEvidenceDraftRepairInput(body) {
   };
 }
 
+// /api/finalize-evidence-draft only. Same topic/draft/research/evidence
+// shape and validation as validateReviewInput()/
+// validateEvidenceDraftRepairInput() — duplicated in full here rather than
+// factored into a shared helper, for the same reason as those two: a few
+// lines of duplication is lower-risk than refactoring code the two
+// standalone endpoints already depend on. No `review` field — this
+// workflow performs the initial review itself.
+function validateEvidenceDraftFinalizeInput(body) {
+  if (typeof body !== "object" || body === null) {
+    return { error: "요청 형식이 올바르지 않습니다." };
+  }
+
+  const topic = typeof body.topic === "string" ? body.topic.trim() : "";
+  if (!topic) return { error: "포스팅 주제/제목은 필수입니다." };
+  if (topic.length > LIMITS.topic) return { error: `제목은 ${LIMITS.topic}자를 넘을 수 없습니다.` };
+
+  const draftParse = DraftSchema.safeParse(body.draft);
+  if (!draftParse.success) return { error: "draft 형식이 올바르지 않습니다." };
+
+  const research = typeof body.research === "string" ? body.research.trim() : "";
+  if (!research) return { error: "research는 필수입니다." };
+
+  const evidenceInput = body.evidence;
+  if (typeof evidenceInput !== "object" || evidenceInput === null) {
+    return { error: "evidence 형식이 올바르지 않습니다." };
+  }
+  if (typeof evidenceInput.tier1Sufficient !== "boolean" || typeof evidenceInput.tier2Used !== "boolean") {
+    return { error: "evidence 형식이 올바르지 않습니다." };
+  }
+  const missingQuestions = Array.isArray(evidenceInput.missingQuestions)
+    ? evidenceInput.missingQuestions.filter((q) => typeof q === "string")
+    : [];
+  const optionalGaps = Array.isArray(evidenceInput.optionalGaps)
+    ? evidenceInput.optionalGaps.filter((g) => typeof g === "string")
+    : [];
+
+  return {
+    value: {
+      topic,
+      draft: draftParse.data,
+      research,
+      evidence: {
+        tier1Sufficient: evidenceInput.tier1Sufficient,
+        tier2Used: evidenceInput.tier2Used,
+        missingQuestions,
+        optionalGaps,
+      },
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP handling
 // ---------------------------------------------------------------------------
@@ -1675,6 +1731,83 @@ async function handleGenerateEvidenceDraft(req, res) {
 // Exactly one Anthropic call per request. Takes an already-produced
 // evidence draft + its research dossier + evidence metadata (the exact
 // shape /api/generate-evidence-draft already returns) and judges it.
+// Shared by /api/review-evidence-draft and /api/finalize-evidence-draft
+// (Phase 2D-3) so the "one review call -> structured parse -> verdict
+// normalization -> semantic validation" core exists in exactly one place.
+// Never writes an HTTP response itself — returns `{ ok: true, review }` or
+// `{ ok: false, status, body }` (handed straight to sendJson by the
+// caller), same pattern as runResearchPipeline(). Anthropic API errors are
+// NOT caught here — they propagate to the caller, mapped by
+// evidenceDraftReviewErrorResponse() below.
+async function runEvidenceDraftReview(client, { topic, draft, research, evidence }) {
+  const message = await client.messages.parse({
+    model: MODEL,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    system: MEDICAL_FACT_REVIEW_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: buildEvidenceDraftReviewUserMessage({ topic, draft, research, evidence }) }],
+    output_config: { format: zodOutputFormat(EvidenceDraftReviewSchema) },
+  });
+
+  if (!message.parsed_output) {
+    console.error("[server] evidence draft review failed: schema_parse_failed");
+    return {
+      ok: false,
+      status: 502,
+      body: { error: "AI 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" },
+    };
+  }
+
+  const review = normalizeEvidenceDraftReviewVerdict(message.parsed_output);
+  const semantic = validateEvidenceDraftReview(review);
+  if (!semantic.ok) {
+    console.error("[server] evidence draft review failed:", semantic.reason);
+    return {
+      ok: false,
+      status: 502,
+      body: { error: "근거 검토 결과가 불완전하여 중단했습니다.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" },
+    };
+  }
+
+  return { ok: true, review };
+}
+
+// Anthropic SDK error -> HTTP response mapping for the reviewer core,
+// extracted byte-for-byte from /api/review-evidence-draft's previous catch
+// block so both /api/review-evidence-draft and /api/finalize-evidence-draft
+// map the same exception types to the same status/message/code/log.
+function evidenceDraftReviewErrorResponse(err) {
+  if (err instanceof Anthropic.AuthenticationError) {
+    console.error("[server] Claude authentication failed (check ANTHROPIC_API_KEY validity):", err.message);
+    return { status: 500, body: { error: "서버의 Claude API 인증에 실패했습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.RateLimitError) {
+    console.error("[server] Claude rate limited:", err.message);
+    return { status: 429, body: { error: "요청이 많아 잠시 지연되고 있습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIConnectionTimeoutError) {
+    console.error("[server] Claude evidence draft review request timed out");
+    return { status: 504, body: { error: "근거 검토가 시간 초과되었습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIConnectionError) {
+    console.error("[server] Claude connection error:", err.message);
+    return { status: 502, body: { error: "Claude API 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.BadRequestError) {
+    console.error("[server] Claude rejected the evidence draft review request:", err.message);
+    return { status: 500, body: { error: "근거 검토 요청 중 오류가 발생했습니다.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIError) {
+    console.error("[server] Claude API error:", err.status, err.message);
+    return { status: 502, body: { error: "근거 검토 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  if (err instanceof Anthropic.AnthropicError) {
+    console.error("[server] Anthropic SDK error (likely config):", err.message);
+    return { status: 500, body: { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+  }
+  console.error("[server] Unexpected error:", err);
+  return { status: 500, body: { error: "예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" } };
+}
+
 async function handleReviewEvidenceDraft(req, res) {
   let body;
   try {
@@ -1700,64 +1833,12 @@ async function handleReviewEvidenceDraft(req, res) {
   }
 
   try {
-    const message = await client.messages.parse({
-      model: MODEL,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      system: MEDICAL_FACT_REVIEW_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: buildEvidenceDraftReviewUserMessage(value) }],
-      output_config: { format: zodOutputFormat(EvidenceDraftReviewSchema) },
-    });
-
-    if (!message.parsed_output) {
-      console.error("[server] evidence draft review failed: schema_parse_failed");
-      return sendJson(res, 502, {
-        error: "AI 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-        code: "EVIDENCE_DRAFT_REVIEW_FAILED",
-      });
-    }
-
-    const review = normalizeEvidenceDraftReviewVerdict(message.parsed_output);
-    const semantic = validateEvidenceDraftReview(review);
-    if (!semantic.ok) {
-      console.error("[server] evidence draft review failed:", semantic.reason);
-      return sendJson(res, 502, {
-        error: "근거 검토 결과가 불완전하여 중단했습니다.",
-        code: "EVIDENCE_DRAFT_REVIEW_FAILED",
-      });
-    }
-
-    return sendJson(res, 200, { review });
+    const result = await runEvidenceDraftReview(client, value);
+    if (!result.ok) return sendJson(res, result.status, result.body);
+    return sendJson(res, 200, { review: result.review });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) {
-      console.error("[server] Claude authentication failed (check ANTHROPIC_API_KEY validity):", err.message);
-      return sendJson(res, 500, { error: "서버의 Claude API 인증에 실패했습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.RateLimitError) {
-      console.error("[server] Claude rate limited:", err.message);
-      return sendJson(res, 429, { error: "요청이 많아 잠시 지연되고 있습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.APIConnectionTimeoutError) {
-      console.error("[server] Claude evidence draft review request timed out");
-      return sendJson(res, 504, { error: "근거 검토가 시간 초과되었습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.APIConnectionError) {
-      console.error("[server] Claude connection error:", err.message);
-      return sendJson(res, 502, { error: "Claude API 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.BadRequestError) {
-      console.error("[server] Claude rejected the evidence draft review request:", err.message);
-      return sendJson(res, 500, { error: "근거 검토 요청 중 오류가 발생했습니다.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.APIError) {
-      console.error("[server] Claude API error:", err.status, err.message);
-      return sendJson(res, 502, { error: "근거 검토 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    if (err instanceof Anthropic.AnthropicError) {
-      console.error("[server] Anthropic SDK error (likely config):", err.message);
-      return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
-    }
-    console.error("[server] Unexpected error:", err);
-    return sendJson(res, 500, { error: "예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REVIEW_FAILED" });
+    const { status, body: errBody } = evidenceDraftReviewErrorResponse(err);
+    return sendJson(res, status, errBody);
   }
 }
 
@@ -1770,6 +1851,97 @@ async function handleReviewEvidenceDraft(req, res) {
 // needed to address the review's issues. Whether those issues are actually
 // resolved is NOT verified here — that is Phase 2D-3's job (re-running the
 // reviewer), deliberately not built in this Phase.
+// Shared by /api/repair-evidence-draft and /api/finalize-evidence-draft
+// (Phase 2D-3) so the "one repair call -> normalize -> semantic validate ->
+// no-op guard -> plainText" core exists in exactly one place. Never writes
+// an HTTP response itself — returns `{ ok: true, draft, plainText }` or
+// `{ ok: false, status, body }`, same pattern as runEvidenceDraftReview()
+// above. Anthropic API errors are NOT caught here — they propagate to the
+// caller, mapped by evidenceDraftRepairErrorResponse() below.
+async function runEvidenceDraftRepair(client, { topic, draft, research, evidence, review }) {
+  const message = await client.messages.parse({
+    model: MODEL,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    system: MEDICAL_FACT_REPAIR_SYSTEM_PROMPT,
+    messages: [{ role: "user", content: buildEvidenceDraftRepairUserMessage({ topic, draft, research, evidence, review }) }],
+    output_config: { format: zodOutputFormat(DraftSchema) },
+  });
+
+  if (!message.parsed_output) {
+    console.error("[server] evidence draft repair failed: schema_parse_failed");
+    return {
+      ok: false,
+      status: 502,
+      body: { error: "AI 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" },
+    };
+  }
+
+  // Same order as the evidence-draft endpoint: normalize -> validate ->
+  // only the normalized+validated draft is ever used downstream.
+  const repairedDraft = normalizeEvidenceDraft(message.parsed_output);
+  const completeness = validateEvidenceDraftContent(repairedDraft);
+  if (!completeness.ok) {
+    console.error("[server] evidence draft repair failed:", completeness.reason);
+    return {
+      ok: false,
+      status: 502,
+      body: { error: "근거 기반 초안 수정 결과가 불완전하여 중단했습니다.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" },
+    };
+  }
+
+  // No-op guard: both callers (the standalone endpoint and the finalize
+  // workflow) only ever invoke this with review.issues.length > 0, so an
+  // unchanged draft is never a legitimate outcome — always fail closed
+  // rather than silently returning the original draft as if repaired.
+  if (evidenceDraftPlainTextUnchanged(draft, repairedDraft)) {
+    console.error("[server] evidence draft repair failed: unchanged_draft");
+    return {
+      ok: false,
+      status: 502,
+      body: { error: "근거 기반 초안이 수정되지 않아 중단했습니다.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" },
+    };
+  }
+
+  return { ok: true, draft: repairedDraft, plainText: composePlainText(repairedDraft) };
+}
+
+// Anthropic SDK error -> HTTP response mapping for the repair core,
+// extracted byte-for-byte from /api/repair-evidence-draft's previous catch
+// block so both /api/repair-evidence-draft and /api/finalize-evidence-draft
+// map the same exception types to the same status/message/code/log.
+function evidenceDraftRepairErrorResponse(err) {
+  if (err instanceof Anthropic.AuthenticationError) {
+    console.error("[server] Claude authentication failed (check ANTHROPIC_API_KEY validity):", err.message);
+    return { status: 500, body: { error: "서버의 Claude API 인증에 실패했습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.RateLimitError) {
+    console.error("[server] Claude rate limited:", err.message);
+    return { status: 429, body: { error: "요청이 많아 잠시 지연되고 있습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIConnectionTimeoutError) {
+    console.error("[server] Claude evidence draft repair request timed out");
+    return { status: 504, body: { error: "초안 수정이 시간 초과되었습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIConnectionError) {
+    console.error("[server] Claude connection error:", err.message);
+    return { status: 502, body: { error: "Claude API 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.BadRequestError) {
+    console.error("[server] Claude rejected the evidence draft repair request:", err.message);
+    return { status: 500, body: { error: "초안 수정 요청 중 오류가 발생했습니다.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.APIError) {
+    console.error("[server] Claude API error:", err.status, err.message);
+    return { status: 502, body: { error: "초안 수정 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  if (err instanceof Anthropic.AnthropicError) {
+    console.error("[server] Anthropic SDK error (likely config):", err.message);
+    return { status: 500, body: { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+  }
+  console.error("[server] Unexpected error:", err);
+  return { status: 500, body: { error: "예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" } };
+}
+
 async function handleRepairEvidenceDraft(req, res) {
   let body;
   try {
@@ -1795,84 +1967,136 @@ async function handleRepairEvidenceDraft(req, res) {
   }
 
   try {
-    const message = await client.messages.parse({
-      model: MODEL,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      system: MEDICAL_FACT_REPAIR_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: buildEvidenceDraftRepairUserMessage(value) }],
-      output_config: { format: zodOutputFormat(DraftSchema) },
-    });
-
-    if (!message.parsed_output) {
-      console.error("[server] evidence draft repair failed: schema_parse_failed");
-      return sendJson(res, 502, {
-        error: "AI 응답을 해석하지 못했습니다. 잠시 후 다시 시도해 주세요.",
-        code: "EVIDENCE_DRAFT_REPAIR_FAILED",
-      });
-    }
-
-    // Same order as the evidence-draft endpoint: normalize -> validate ->
-    // only the normalized+validated draft is ever used downstream.
-    const repairedDraft = normalizeEvidenceDraft(message.parsed_output);
-    const completeness = validateEvidenceDraftContent(repairedDraft);
-    if (!completeness.ok) {
-      console.error("[server] evidence draft repair failed:", completeness.reason);
-      return sendJson(res, 502, {
-        error: "근거 기반 초안 수정 결과가 불완전하여 중단했습니다.",
-        code: "EVIDENCE_DRAFT_REPAIR_FAILED",
-      });
-    }
-
-    // No-op guard: validateEvidenceDraftRepairInput() already guarantees
-    // review.issues.length > 0, so an unchanged draft is never a
-    // legitimate outcome of this endpoint — always fail closed rather than
-    // silently returning the original draft as if it had been repaired.
-    if (evidenceDraftPlainTextUnchanged(value.draft, repairedDraft)) {
-      console.error("[server] evidence draft repair failed: unchanged_draft");
-      return sendJson(res, 502, {
-        error: "근거 기반 초안이 수정되지 않아 중단했습니다.",
-        code: "EVIDENCE_DRAFT_REPAIR_FAILED",
-      });
-    }
-
-    const plainText = composePlainText(repairedDraft);
+    const result = await runEvidenceDraftRepair(client, value);
+    if (!result.ok) return sendJson(res, result.status, result.body);
     return sendJson(res, 200, {
-      draft: repairedDraft,
-      plainText,
+      draft: result.draft,
+      plainText: result.plainText,
       appliedReview: { verdict: value.review.verdict, issueCount: value.review.issues.length },
     });
   } catch (err) {
-    if (err instanceof Anthropic.AuthenticationError) {
-      console.error("[server] Claude authentication failed (check ANTHROPIC_API_KEY validity):", err.message);
-      return sendJson(res, 500, { error: "서버의 Claude API 인증에 실패했습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.RateLimitError) {
-      console.error("[server] Claude rate limited:", err.message);
-      return sendJson(res, 429, { error: "요청이 많아 잠시 지연되고 있습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.APIConnectionTimeoutError) {
-      console.error("[server] Claude evidence draft repair request timed out");
-      return sendJson(res, 504, { error: "초안 수정이 시간 초과되었습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.APIConnectionError) {
-      console.error("[server] Claude connection error:", err.message);
-      return sendJson(res, 502, { error: "Claude API 연결에 실패했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.BadRequestError) {
-      console.error("[server] Claude rejected the evidence draft repair request:", err.message);
-      return sendJson(res, 500, { error: "초안 수정 요청 중 오류가 발생했습니다.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.APIError) {
-      console.error("[server] Claude API error:", err.status, err.message);
-      return sendJson(res, 502, { error: "초안 수정 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    if (err instanceof Anthropic.AnthropicError) {
-      console.error("[server] Anthropic SDK error (likely config):", err.message);
-      return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
-    }
-    console.error("[server] Unexpected error:", err);
-    return sendJson(res, 500, { error: "예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.", code: "EVIDENCE_DRAFT_REPAIR_FAILED" });
+    const { status, body: errBody } = evidenceDraftRepairErrorResponse(err);
+    return sendJson(res, status, errBody);
   }
+}
+
+// Phase 2D-3: bounded review -> repair -> final review workflow, built
+// entirely out of runEvidenceDraftReview()/runEvidenceDraftRepair() above —
+// no reviewer/repair logic is duplicated here. Anthropic calls are capped
+// by construction, not by a counter or a loop guard: the function contains
+// exactly one call site for the initial review, one for repair, and one
+// for the final review, with no loop, no recursion, and no code path that
+// revisits an earlier step. That makes 1 call (blocking-free draft) or
+// exactly 3 calls (blocking found) the only two possible outcomes.
+// Warnings never trigger repair or a second review call — only
+// initialBlockingCount does — because reviewer warnings were observed to
+// be non-deterministic across repeated calls, and chasing "zero warnings"
+// would risk both unbounded drift from the original draft and unnecessary
+// Anthropic spend. This endpoint never publishes anything anywhere; it
+// only returns a medical/fact review judgment.
+async function handleFinalizeEvidenceDraft(req, res) {
+  let body;
+  try {
+    body = await readJsonBody(req, MAX_EVIDENCE_DRAFT_FINALIZE_BODY_BYTES);
+  } catch (err) {
+    return sendJson(res, err.statusCode === 413 ? 413 : 400, {
+      error: err.statusCode === 413 ? "요청이 너무 큽니다." : "요청 형식이 올바르지 않습니다.",
+    });
+  }
+
+  const { error, value } = validateEvidenceDraftFinalizeInput(body);
+  if (error) return sendJson(res, 400, { error });
+
+  if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+    console.error("[server] /api/finalize-evidence-draft called but ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN is not set");
+    return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요." });
+  }
+
+  const client = getClient();
+  if (!client) {
+    console.error("[server] Claude client failed to initialize:", clientInitError?.message);
+    return sendJson(res, 500, { error: "서버에 Claude API가 아직 설정되지 않았습니다. 관리자에게 문의해 주세요." });
+  }
+
+  // --- STEP 1: initial review (exactly 1 call) ---
+  let initialReview;
+  try {
+    const result = await runEvidenceDraftReview(client, value);
+    if (!result.ok) return sendJson(res, result.status, result.body);
+    initialReview = result.review;
+  } catch (err) {
+    const { status, body: errBody } = evidenceDraftReviewErrorResponse(err);
+    return sendJson(res, status, errBody);
+  }
+
+  const initialBlockingCount = initialReview.issues.filter((issue) => issue.severity === "blocking").length;
+  console.log(`[server] evidence finalize: initial blocking=${initialBlockingCount}`);
+
+  // --- No blocking issues: done. Warnings alone never trigger repair or a
+  // second review call — the initial review doubles as the final review,
+  // and the original (normalized-at-generation-time) draft is returned
+  // unchanged. Total Anthropic calls for this path: 1. ---
+  if (initialBlockingCount === 0) {
+    console.log("[server] evidence finalize: repaired=false");
+    return sendJson(res, 200, {
+      draft: value.draft,
+      plainText: composePlainText(value.draft),
+      workflow: {
+        repaired: false,
+        initialBlockingCount: 0,
+        finalBlockingCount: 0,
+        medicalFactReady: true,
+      },
+      initialReview,
+      finalReview: initialReview,
+    });
+  }
+
+  // --- STEP 2: repair (exactly 1 call, only reached when blocking > 0) ---
+  let repaired;
+  try {
+    const result = await runEvidenceDraftRepair(client, { topic: value.topic, draft: value.draft, research: value.research, evidence: value.evidence, review: initialReview });
+    if (!result.ok) return sendJson(res, result.status, result.body);
+    repaired = result;
+  } catch (err) {
+    const { status, body: errBody } = evidenceDraftRepairErrorResponse(err);
+    return sendJson(res, status, errBody);
+  }
+  console.log("[server] evidence finalize: repaired=true");
+
+  // --- STEP 3: final review (exactly 1 call). Whatever finalBlockingCount
+  // comes back — 0 or not — this function returns here; there is no code
+  // path back to STEP 2 for a second repair. ---
+  let finalReview;
+  try {
+    const result = await runEvidenceDraftReview(client, { topic: value.topic, draft: repaired.draft, research: value.research, evidence: value.evidence });
+    if (!result.ok) return sendJson(res, result.status, result.body);
+    finalReview = result.review;
+  } catch (err) {
+    const { status, body: errBody } = evidenceDraftReviewErrorResponse(err);
+    return sendJson(res, status, errBody);
+  }
+
+  const finalBlockingCount = finalReview.issues.filter((issue) => issue.severity === "blocking").length;
+  console.log(`[server] evidence finalize: final blocking=${finalBlockingCount}`);
+
+  // A remaining blocking issue is not an endpoint failure — the workflow
+  // completed exactly as designed, it just didn't clear the medical/fact
+  // gate. Returned as a normal 200 with medicalFactReady: false, never as
+  // an EVIDENCE_DRAFT_*_FAILED error (those are reserved for the technical
+  // failures already handled above).
+  return sendJson(res, 200, {
+    draft: repaired.draft,
+    plainText: repaired.plainText,
+    workflow: {
+      repaired: true,
+      initialBlockingCount,
+      finalBlockingCount,
+      medicalFactReady: finalBlockingCount === 0,
+    },
+    initialReview,
+    finalReview,
+  });
 }
 
 async function serveStatic(req, res) {
@@ -1903,6 +2127,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/repair-evidence-draft") {
     return handleRepairEvidenceDraft(req, res);
   }
+  if (req.method === "POST" && url.pathname === "/api/finalize-evidence-draft") {
+    return handleFinalizeEvidenceDraft(req, res);
+  }
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
     return serveStatic(req, res);
   }
@@ -1911,7 +2138,8 @@ const server = http.createServer(async (req, res) => {
     url.pathname === "/api/research" ||
     url.pathname === "/api/generate-evidence-draft" ||
     url.pathname === "/api/review-evidence-draft" ||
-    url.pathname === "/api/repair-evidence-draft"
+    url.pathname === "/api/repair-evidence-draft" ||
+    url.pathname === "/api/finalize-evidence-draft"
   ) {
     return sendJson(res, 405, { error: "Method not allowed" });
   }
