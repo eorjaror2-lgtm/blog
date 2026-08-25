@@ -8,4 +8,8 @@ Thumbs.db
 
 # Local configuration
 .env
+.env.local
 local.settings.json
+
+# Node
+node_modules/

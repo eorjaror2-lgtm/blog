@@ -106,7 +106,7 @@
             gap: 8px;
         }
 
-        input[type="text"], input[type="password"] {
+        input[type="text"], input[type="password"], textarea.notes-input {
             width: 100%;
             padding: 18px 24px;
             border: 1.5px solid #e2e8f0;
@@ -116,14 +116,38 @@
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             background: rgba(255, 255, 255, 0.6);
             color: var(--text-main);
+            font-family: inherit;
         }
 
-        input:focus {
+        textarea.notes-input {
+            height: 90px;
+            resize: vertical;
+            line-height: 1.5;
+        }
+
+        input:focus, textarea.notes-input:focus {
             outline: none;
             border-color: var(--accent);
             background: #fff;
             box-shadow: 0 0 0 5px rgba(37, 99, 235, 0.1);
             transform: translateY(-2px);
+        }
+
+        .disclaimer {
+            font-size: 13px;
+            color: var(--text-muted);
+            background: rgba(219, 234, 254, 0.5);
+            border: 1px solid rgba(37, 99, 235, 0.15);
+            border-radius: 12px;
+            padding: 10px 16px;
+            margin-bottom: 20px;
+        }
+
+        .server-note {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-align: center;
+            margin-top: 40px;
         }
 
         /* Generate Button */
@@ -253,14 +277,6 @@
         }
 
         @keyframes spin { to { transform: rotate(360deg); } }
-
-        /* Key Input Area (Security) */
-        .settings-area {
-            margin-top: 50px;
-            padding: 30px;
-            background: rgba(241, 245, 249, 0.5);
-            border-radius: 20px;
-        }
     </style>
 </head>
 
@@ -288,10 +304,17 @@
                 <label for="subKeywords">🏷️ 서브 키워드 (연관어)</label>
                 <input type="text" id="subKeywords" placeholder="콤마(,)로 구분해 여러 개 입력 가능">
             </div>
+
+            <div class="form-group full-width">
+                <label for="optionalNotes">📋 참고 메모 (선택 — 실제 진료 경험/근거가 있다면)</label>
+                <textarea class="notes-input" id="optionalNotes" placeholder="실제로 겪은 진료 사례나 강조하고 싶은 근거를 적어주시면, 그 내용만 1인칭 경험으로 반영합니다. 비워두면 AI가 경험을 지어내지 않고 일반적인 표현을 사용합니다."></textarea>
+            </div>
         </div>
 
+        <div class="disclaimer">🩺 AI가 작성한 초안입니다. 게시 전 의학적 검토가 필요합니다.</div>
+
         <button class="btn-generate" id="generateBtn" onclick="generateBlog()">
-            <span>✨ 프리미엄 원고 생성하기</span>
+            <span>✨ 초안 생성하기</span>
         </button>
 
         <div class="loading" id="loading">
@@ -304,7 +327,7 @@
                 <div class="result-title">📄 생성된 네이버 블로그 원고</div>
                 <div class="stats">
                     <span id="charCount">공백 제외: <b>0</b>자</span>
-                    <span id="keywordDensity">키워드 반복: <b>0</b>회</span>
+                    <span id="keywordDensity">키워드 등장: <b>0</b>회</span>
                 </div>
             </div>
             <div class="textarea-wrapper">
@@ -313,13 +336,7 @@
             </div>
         </div>
 
-        <div class="settings-area">
-            <div class="form-group">
-                <label for="apiKey">🔐 Gemini API Key (Security)</label>
-                <input type="password" id="apiKey" value="" placeholder="개인 API 키를 여기에 입력하세요.">
-                <p style="font-size: 12px; color: var(--text-muted); margin-top: 8px;">* 입력된 키는 외부로 전송되지 않으며 브라우저 메모리에만 상주합니다.</p>
-            </div>
-        </div>
+        <p class="server-note">Claude API는 서버에서 안전하게 연결됩니다.</p>
     </div>
 
     <script>
@@ -340,13 +357,17 @@
             }
         }
 
-        async function generateBlog() {
-            const title = document.getElementById('title').value;
-            const mainKeyword = document.getElementById('mainKeyword').value;
-            const subKeywords = document.getElementById('subKeywords').value;
-            const API_KEY = document.getElementById('apiKey').value;
+        let requestInFlight = false;
 
-            if (!title || !mainKeyword) {
+        async function generateBlog() {
+            if (requestInFlight) return; // guard against double submit
+
+            const topic = document.getElementById('title').value.trim();
+            const targetKeyword = document.getElementById('mainKeyword').value.trim();
+            const subKeywords = document.getElementById('subKeywords').value.trim();
+            const optionalNotes = document.getElementById('optionalNotes').value.trim();
+
+            if (!topic || !targetKeyword) {
                 alert("제목과 메인 키워드는 필수입니다.");
                 return;
             }
@@ -356,64 +377,38 @@
             const resultContainer = document.getElementById('resultContainer');
             const resultText = document.getElementById('resultText');
 
+            requestInFlight = true;
             generateBtn.disabled = true;
             loading.style.display = 'block';
             resultContainer.classList.remove('active');
             rotateLoadingMsg();
 
-            const prompt = `당신은 유방외과/갑상선 분야의 신뢰받는 전문의이자 스타 블로거입니다. 
-대한민국의 네이버 블로그 검색 엔진 최적화(SEO) 가이드라인인 C-Rank와 D.I.A.+ 로직을 완벽히 준수하여 전문성과 경험이 돋보이는 글을 작성하세요.
-
-[입력 데이터]
-- 최종 목표 제목: ${title}
-- 메인 키워드: ${mainKeyword}
-- 서브 키워드: ${subKeywords}
-
-[네이버 SEO 최적화 규칙]
-1. **D.I.A.+ (경험 점수)**: 단순 정보 나열이 아닌, "오늘 진료실에 오신 분의 고충"이나 "직접 수술을 집도하며 느낀 점" 등 본인만의 독창적인 '경험 사례'를 도입부에 반드시 배치하세요.
-2. **C-Rank (신뢰 점수)**: 의학적 근거가 명확한 전문 지식을 포함하되, 환자가 이해하기 쉬운 비유와 평어체(~다)로 친절하게 설명하세요.
-3. **가독성 (UX)**: 마크다운 형식을 사용하여 소제목(###), 불렛 포인트, **굵게 효과**를 적절히 섞어 네이버 에디터에 붙여넣기 좋게 만드세요.
-4. **키워드 설계**: 메인 키워드는 서론/결론에 각 1회, 본문 내에는 5~8회 정도 문맥에 맞게 자연스럽게 반복하세요.
-5. **분량**: 공백 제외 최소 1,800자 이상의 매우 상세하고 풍부한 정보량을 제공하세요.
-6. **CTA**: 글 말미에 정기 검진의 중요성을 강조하고 병원 상담/문의를 유도하는 당위성 있는 메시지를 넣으세요.
-
-글자 수는 충분히 길게 가져가며, 가독성을 위해 한 문단은 3~4줄을 넘기지 마세요.`;
-
-            const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${API_KEY}`;
-
             try {
-                const response = await fetch(url, {
+                const response = await fetch('/api/generate-draft', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                    body: JSON.stringify({ topic, targetKeyword, subKeywords, optionalNotes })
                 });
 
                 const data = await response.json();
-                
-                if (data.error) {
-                    throw new Error(data.error.message || "API 오류가 발생했습니다.");
+
+                if (!response.ok) {
+                    throw new Error(data.error || "초안 생성 중 오류가 발생했습니다.");
                 }
 
-                if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts) {
-                    const output = data.candidates[0].content.parts[0].text;
-                    resultText.value = output;
-                    
-                    // Update Stats
-                    const chars = output.replace(/\s/g, "").length;
-                    document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
-                    
-                    const escapedKeyword = mainKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                    const keywords = (output.match(new RegExp(escapedKeyword, 'g')) || []).length;
-                    document.getElementById('keywordDensity').innerHTML = `키워드 반복: <b>${keywords}</b>회`;
-                } else if (data.candidates && data.candidates[0].finishReason === "SAFETY") {
-                    throw new Error("안전 정책에 의해 원고가 생성되지 않았습니다. 다른 키워드를 시도해 주세요.");
-                } else {
-                    throw new Error("원고 생성 결과가 없습니다. API 키와 설정을 확인해주세요.");
-                }
+                resultText.value = data.plainText;
+
+                const chars = data.plainText.replace(/\s/g, "").length;
+                document.getElementById('charCount').innerHTML = `공백 제외: <b>${chars}</b>자`;
+
+                const escapedKeyword = targetKeyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const keywordHits = (data.plainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
+                document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>${keywordHits}</b>회`;
             } catch (e) {
                 resultText.value = "❌ 오류 발생: " + e.message;
                 console.error(e);
             } finally {
+                requestInFlight = false;
                 generateBtn.disabled = false;
                 loading.style.display = 'none';
                 resultContainer.classList.add('active'); // 항상 보여줌 (오류 메시지 포함)
@@ -421,12 +416,18 @@
             }
         }
 
-        function copyToClipboard() {
+        async function copyToClipboard() {
             const text = document.getElementById('resultText');
-            text.select();
-            document.execCommand('copy');
-            
             const btn = document.getElementById('copyBtn');
+
+            try {
+                await navigator.clipboard.writeText(text.value);
+            } catch (e) {
+                // Fallback for environments without Clipboard API access
+                text.select();
+                document.execCommand('copy');
+            }
+
             btn.innerText = "성공적으로 복사됨! ✨";
             btn.style.background = "#10b981";
             setTimeout(() => {
