@@ -548,6 +548,39 @@ async function runWebSearchStage(client, { system, userContent, allowedDomains, 
   return { research, disallowedHosts, sources, notices };
 }
 
+// Tier 1 only: web_search's allowed_domains is not a fully reliable
+// enforcement boundary on its own (real testing showed disallowed hosts
+// occasionally slip into final citations non-deterministically), and a
+// second, independent attempt with the exact same policy was observed to
+// self-correct. So a source-policy violation gets exactly one retry here —
+// same domains/prompt/model/timeout, a brand-new search call, and the
+// violating attempt's research/citations are fully discarded (never reused
+// or merged). Any other failure (auth, timeout, rate limit, network,
+// empty response) throws out of runWebSearchStage before the loop's
+// disallowedHosts check ever runs, so it is never retried by this loop.
+const MAX_TIER1_POLICY_ATTEMPTS = 2; // 최초 1회 + policy violation 시 재검색 1회, 그 이상 없음
+
+async function runTier1WithPolicyRetry(client, value) {
+  let lastDisallowedHosts = [];
+  for (let attempt = 1; attempt <= MAX_TIER1_POLICY_ATTEMPTS; attempt++) {
+    const result = await runWebSearchStage(client, {
+      system: TIER1_SYSTEM_PROMPT,
+      userContent: buildTier1UserMessage(value),
+      allowedDomains: TIER1_RESEARCH_ALLOWED_DOMAINS,
+      maxUses: MAX_TIER1_SEARCHES,
+      tier: 1,
+    });
+    if (!result.disallowedHosts.length) {
+      return { ok: true, result };
+    }
+    lastDisallowedHosts = result.disallowedHosts; // not merged with any earlier attempt's hosts
+    if (attempt < MAX_TIER1_POLICY_ATTEMPTS) {
+      console.warn("[server] Tier 1 source-policy violation; retrying once:", lastDisallowedHosts.join(", "));
+    }
+  }
+  return { ok: false, disallowedHosts: lastDisallowedHosts };
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -729,23 +762,18 @@ async function handleResearch(req, res) {
   }
 
   try {
-    // --- Step 1: Tier 1 (official sources) ---
-    const tier1 = await runWebSearchStage(client, {
-      system: TIER1_SYSTEM_PROMPT,
-      userContent: buildTier1UserMessage(value),
-      allowedDomains: TIER1_RESEARCH_ALLOWED_DOMAINS,
-      maxUses: MAX_TIER1_SEARCHES,
-      tier: 1,
-    });
-
-    if (tier1.disallowedHosts.length) {
-      console.error("[server] research blocked: disallowed Tier 1 citation host(s) used:", tier1.disallowedHosts.join(", "));
+    // --- Step 1: Tier 1 (official sources), with one internal retry on a
+    // source-policy violation only (see runTier1WithPolicyRetry) ---
+    const tier1Attempt = await runTier1WithPolicyRetry(client, value);
+    if (!tier1Attempt.ok) {
+      console.error("[server] research blocked: disallowed Tier 1 citation host(s) used:", tier1Attempt.disallowedHosts.join(", "));
       return sendJson(res, 502, {
         error: "허용되지 않은 의료 출처가 검색 결과에 사용되어 근거조사를 중단했습니다.",
         code: "RESEARCH_SOURCE_POLICY_VIOLATION",
-        domains: tier1.disallowedHosts,
+        domains: tier1Attempt.disallowedHosts,
       });
     }
+    const tier1 = tier1Attempt.result;
 
     if (!tier1.research) {
       console.error("[server] Tier 1 research had no text content.");
