@@ -12,6 +12,7 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -4246,8 +4247,220 @@ async function serveStatic(req, res) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+// ---------------------------------------------------------------------------
+// Single-user password gate (Vercel/Production only) — this is the one
+// thing standing between the public internet and a paid Anthropic API key,
+// so it runs first, unconditionally, ahead of every other route in
+// handleRequest() below (section 7 of the brief: "인증 검사는 Claude 호출보다
+// 반드시 먼저 실행되어야 한다"). No accounts, no DB, no OAuth: one
+// APP_PASSWORD env var is the entire trust boundary.
+//
+// getAppAuthState():
+// - "required"      — APP_PASSWORD is set. Every request (UI and /api/*)
+//                      must carry a valid signed cookie, or get the login
+//                      page / a 401.
+// - "misconfigured" — running on Vercel (process.env.VERCEL is always set
+//                      there) with NO APP_PASSWORD configured. Fails
+//                      closed: every request gets a 500, nothing is ever
+//                      silently public because someone forgot to set the
+//                      env var.
+// - "open"          — local `npm run dev` with no APP_PASSWORD in
+//                      .env.local. Auth is skipped entirely so the existing
+//                      local workflow is unchanged. This branch can never
+//                      be reached on Vercel (VERCEL is always set there).
+//
+// Read live via process.env on every call (not cached in a module-level
+// const at import time) so both a real `npm run dev` restart AND this
+// file's own tests (which flip process.env.APP_PASSWORD/VERCEL between
+// cases within the same process) see the current value.
+function appPassword() {
+  return process.env.APP_PASSWORD || "";
+}
+function getAppAuthState() {
+  if (appPassword()) return "required";
+  if (process.env.VERCEL) return "misconfigured";
+  return "open";
+}
+
+const AUTH_COOKIE_NAME = "blog_auth";
+const AUTH_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days — "로그인 한 번 -> 계속 사용"
+
+// The session cookie is a stateless HMAC-signed `<expiresAtMs>.<signature>`
+// token — no session DB, no Redis, no second secret. The HMAC signing key
+// is sha256(APP_PASSWORD), never the raw password itself: a leaked cookie
+// can prove it was signed by someone who knows APP_PASSWORD, but can never
+// be reversed back into APP_PASSWORD. One already-secret env var is enough
+// to both check the submitted password (handleLogin()) AND sign/verify the
+// cookie — a separate APP_SESSION_SECRET would only add a second value to
+// manage for no additional safety here (single user, single trust
+// boundary), so this deliberately does not introduce one.
+function authSigningKey() {
+  return createHash("sha256").update(appPassword()).digest();
+}
+
+function signAuthToken(expiresAtMs) {
+  const payload = String(expiresAtMs);
+  const sig = createHmac("sha256", authSigningKey()).update(payload).digest("hex");
+  return `${payload}.${sig}`;
+}
+
+function verifyAuthToken(token) {
+  if (typeof token !== "string") return false;
+  const dot = token.indexOf(".");
+  if (dot < 0) return false;
+  const payload = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = createHmac("sha256", authSigningKey()).update(payload).digest("hex");
+  const sigBuf = Buffer.from(sig, "hex");
+  const expectedBuf = Buffer.from(expected, "hex");
+  if (sig.length === 0 || sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
+    return false;
+  }
+  const expiresAtMs = Number(payload);
+  return Number.isFinite(expiresAtMs) && Date.now() <= expiresAtMs;
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (typeof header !== "string") return out;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const key = part.slice(0, eq).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(part.slice(eq + 1).trim());
+    } catch {
+      out[key] = part.slice(eq + 1).trim();
+    }
+  }
+  return out;
+}
+
+function isAuthedRequest(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  return verifyAuthToken(cookies[AUTH_COOKIE_NAME]);
+}
+
+// HttpOnly (browser JS never touches the token — no localStorage/
+// sessionStorage involved) + Secure on Vercel (skipped for plain-http
+// localhost, where the browser would otherwise silently drop the cookie) +
+// SameSite=Lax (sent on normal same-site navigation/fetch, blocked on
+// cross-site requests).
+function setAuthCookie(res) {
+  const token = signAuthToken(Date.now() + AUTH_COOKIE_MAX_AGE_SECONDS * 1000);
+  const secure = process.env.VERCEL ? " Secure;" : "";
+  res.setHeader(
+    "Set-Cookie",
+    `${AUTH_COOKIE_NAME}=${token}; HttpOnly;${secure} SameSite=Lax; Path=/; Max-Age=${AUTH_COOKIE_MAX_AGE_SECONDS}`,
+  );
+}
+
+// Never behind the auth gate itself (a not-yet-authed browser must be able
+// to reach this) — the password check inside is the gate. Deliberately
+// tiny/self-contained (inline style + inline script, no external
+// requests) so it needs no other static asset and cannot itself leak
+// APP_PASSWORD: the password is only ever sent once, over POST JSON, to
+// this same origin, and is never written to localStorage/sessionStorage/
+// any DOM attribute.
+function serveLoginPage(res, { error } = {}) {
+  const errorHtml = error ? `<p id="err">${error}</p>` : `<p id="err"></p>`;
+  const html = `<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>블로그 자동화</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8fafc;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center}
+form{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);width:min(90vw,320px)}
+h1{font-size:1.15rem;margin:0 0 1.25rem;text-align:center;color:#1e293b}
+input{width:100%;box-sizing:border-box;padding:.65rem .75rem;border:1px solid #cbd5e1;border-radius:8px;font-size:1rem;margin-bottom:.75rem}
+button{width:100%;padding:.65rem;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-size:1rem;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+#err{color:#dc2626;font-size:.85rem;min-height:1.2em;margin:0 0 .5rem;text-align:center}
+</style></head>
+<body>
+<form id="f">
+<h1>블로그 자동화</h1>
+${errorHtml}
+<input type="password" id="pw" placeholder="비밀번호" autocomplete="current-password" autofocus required>
+<button type="submit" id="btn">로그인</button>
+</form>
+<script>
+document.getElementById('f').addEventListener('submit', async function (e) {
+  e.preventDefault();
+  var btn = document.getElementById('btn');
+  var err = document.getElementById('err');
+  var pw = document.getElementById('pw').value;
+  err.textContent = '';
+  btn.disabled = true;
+  try {
+    var res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (res.ok) { window.location.reload(); return; }
+    var data = await res.json().catch(function () { return {}; });
+    err.textContent = data.error || '비밀번호가 올바르지 않습니다.';
+  } catch (e2) {
+    err.textContent = '로그인 중 오류가 발생했습니다.';
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body></html>`;
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+async function handleLogin(req, res) {
+  const authState = getAppAuthState();
+  if (authState === "misconfigured") {
+    return sendJson(res, 500, { error: "서버에 접근 비밀번호가 설정되지 않았습니다. 관리자에게 문의해 주세요." });
+  }
+  let body;
+  try {
+    body = await readJsonBody(req, 2048);
+  } catch (err) {
+    return sendJson(res, err.statusCode === 413 ? 413 : 400, { error: "요청 형식이 올바르지 않습니다." });
+  }
+  if (authState === "open") {
+    // Local dev without APP_PASSWORD — nothing to protect, and the login
+    // page is never actually shown in this mode (see handleRequest()'s
+    // gate below), so this only matters for a direct manual call.
+    return sendJson(res, 200, { ok: true });
+  }
+  const submitted = typeof body?.password === "string" ? body.password : "";
+  const submittedBuf = Buffer.from(submitted);
+  const expectedBuf = Buffer.from(appPassword());
+  const match = submittedBuf.length === expectedBuf.length && timingSafeEqual(submittedBuf, expectedBuf);
+  if (!match) {
+    return sendJson(res, 401, { error: "비밀번호가 올바르지 않습니다." });
+  }
+  setAuthCookie(res);
+  return sendJson(res, 200, { ok: true });
+}
+// ---------------------------------------------------------------------------
+
+async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // Always reachable, auth or not — this IS the auth gate for everything
+  // else.
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    return handleLogin(req, res);
+  }
+
+  const authState = getAppAuthState();
+  if (authState === "misconfigured") {
+    return sendJson(res, 500, { error: "서버에 접근 비밀번호가 설정되지 않았습니다. 관리자에게 문의해 주세요." });
+  }
+  if (authState === "required" && !isAuthedRequest(req)) {
+    if (url.pathname.startsWith("/api/")) {
+      return sendJson(res, 401, { error: "인증이 필요합니다." });
+    }
+    return serveLoginPage(res);
+  }
 
   if (req.method === "POST" && url.pathname === "/api/generate-draft") {
     return handleGenerateDraft(req, res);
@@ -4293,7 +4506,9 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 405, { error: "Method not allowed" });
   }
   return sendJson(res, 404, { error: "Not found" });
-});
+}
+
+const server = http.createServer(handleRequest);
 
 // Only start listening when this file is executed directly (`node server.js`
 // / `npm run dev`), never when merely imported as a module. This guard
@@ -4330,4 +4545,8 @@ export {
   runAdComplianceFinalizeWorkflow,
   runFinalizeAdComplianceStep,
   runFinalMedicalRecheckStep,
+  handleRequest,
+  getAppAuthState,
+  verifyAuthToken,
+  signAuthToken,
 };
