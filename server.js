@@ -4237,52 +4237,45 @@ async function handleFinalizeAdCompliance(req, res) {
   }
 }
 
-// __dirname (source-file-relative) is correct for `node server.js` /
-// `npm run dev` and is tried first, unchanged from before. On Vercel,
-// api/gateway.js's bundler can relocate the code that originally lived in
-// this file, so import.meta.url (and therefore __dirname) no longer points
-// at this project's root the way it does locally — index.html (placed at
-// the project root by vercel.json's functions."api/gateway.js".includeFiles)
-// can end up not found via that path even though it was bundled. Vercel
-// Node functions reliably set the process cwd to the function's own root,
-// so process.cwd() is tried as a second candidate — this is additive only;
-// local dev never reaches it because the first candidate already succeeds.
+// Local `npm run dev` only — on Vercel, index.html is deployed as a real
+// static asset (see vercel.json / .vercelignore) and never reaches this
+// function; Vercel's rewrite there only forwards /api/(.*), not "/". No
+// __dirname-vs-bundle-location guessing needed here anymore.
 async function serveStatic(req, res) {
-  const candidates = [join(__dirname, "index.html")];
-  if (process.cwd() !== __dirname) candidates.push(join(process.cwd(), "index.html"));
-
-  let lastErr;
-  for (const path of candidates) {
-    try {
-      const html = await readFile(path);
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(html);
-      return;
-    } catch (err) {
-      lastErr = err;
-    }
+  try {
+    const html = await readFile(join(__dirname, "index.html"));
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+  } catch {
+    sendJson(res, 404, { error: "Not found" });
   }
-  console.error("[server] serveStatic: index.html not found at any candidate path:", candidates, lastErr?.message);
-  sendJson(res, 404, { error: "Not found" });
 }
 
 // ---------------------------------------------------------------------------
-// Single-user password gate (Vercel/Production only) — this is the one
-// thing standing between the public internet and a paid Anthropic API key,
-// so it runs first, unconditionally, ahead of every other route in
-// handleRequest() below (section 7 of the brief: "인증 검사는 Claude 호출보다
-// 반드시 먼저 실행되어야 한다"). No accounts, no DB, no OAuth: one
-// APP_PASSWORD env var is the entire trust boundary.
+// Single-user password gate protecting /api/* (Vercel/Production only) —
+// this is the one thing standing between the public internet and a paid
+// Anthropic API key, so it runs first, unconditionally, ahead of every
+// /api/* route in handleRequest() below (section 7 of the brief: "인증
+// 검사는 Claude 호출보다 반드시 먼저 실행되어야 한다"). No accounts, no DB,
+// no OAuth: one APP_PASSWORD env var is the entire trust boundary.
+//
+// The static UI (index.html) is deliberately NOT gated here — on Vercel it
+// is served directly as a static file and never reaches this function at
+// all (see vercel.json's rewrites, scoped to /api/(.*) only); index.html's
+// own login overlay is a UX convenience, never the security boundary. A
+// user who forges/hides that overlay still cannot call any Anthropic-
+// calling endpoint without a valid auth cookie.
 //
 // getAppAuthState():
-// - "required"      — APP_PASSWORD is set. Every request (UI and /api/*)
-//                      must carry a valid signed cookie, or get the login
-//                      page / a 401.
+// - "required"      — APP_PASSWORD is set. Every /api/* request must carry
+//                      a valid signed cookie (checked via /api/login GET)
+//                      or get a 401 — except /api/login itself, which is
+//                      how a cookie gets issued in the first place.
 // - "misconfigured" — running on Vercel (process.env.VERCEL is always set
 //                      there) with NO APP_PASSWORD configured. Fails
-//                      closed: every request gets a 500, nothing is ever
-//                      silently public because someone forgot to set the
-//                      env var.
+//                      closed: every /api/* request gets a 500, nothing is
+//                      ever silently public because someone forgot to set
+//                      the env var.
 // - "open"          — local `npm run dev` with no APP_PASSWORD in
 //                      .env.local. Auth is skipped entirely so the existing
 //                      local workflow is unchanged. This branch can never
@@ -4375,61 +4368,21 @@ function setAuthCookie(res) {
   );
 }
 
-// Never behind the auth gate itself (a not-yet-authed browser must be able
-// to reach this) — the password check inside is the gate. Deliberately
-// tiny/self-contained (inline style + inline script, no external
-// requests) so it needs no other static asset and cannot itself leak
-// APP_PASSWORD: the password is only ever sent once, over POST JSON, to
-// this same origin, and is never written to localStorage/sessionStorage/
-// any DOM attribute.
-function serveLoginPage(res, { error } = {}) {
-  const errorHtml = error ? `<p id="err">${error}</p>` : `<p id="err"></p>`;
-  const html = `<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>블로그 자동화</title>
-<style>
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8fafc;min-height:100vh;margin:0;display:flex;align-items:center;justify-content:center}
-form{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08);width:min(90vw,320px)}
-h1{font-size:1.15rem;margin:0 0 1.25rem;text-align:center;color:#1e293b}
-input{width:100%;box-sizing:border-box;padding:.65rem .75rem;border:1px solid #cbd5e1;border-radius:8px;font-size:1rem;margin-bottom:.75rem}
-button{width:100%;padding:.65rem;border:0;border-radius:8px;background:#4f46e5;color:#fff;font-size:1rem;cursor:pointer}
-button:disabled{opacity:.6;cursor:default}
-#err{color:#dc2626;font-size:.85rem;min-height:1.2em;margin:0 0 .5rem;text-align:center}
-</style></head>
-<body>
-<form id="f">
-<h1>블로그 자동화</h1>
-${errorHtml}
-<input type="password" id="pw" placeholder="비밀번호" autocomplete="current-password" autofocus required>
-<button type="submit" id="btn">로그인</button>
-</form>
-<script>
-document.getElementById('f').addEventListener('submit', async function (e) {
-  e.preventDefault();
-  var btn = document.getElementById('btn');
-  var err = document.getElementById('err');
-  var pw = document.getElementById('pw').value;
-  err.textContent = '';
-  btn.disabled = true;
-  try {
-    var res = await fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: pw }),
-    });
-    if (res.ok) { window.location.reload(); return; }
-    var data = await res.json().catch(function () { return {}; });
-    err.textContent = data.error || '비밀번호가 올바르지 않습니다.';
-  } catch (e2) {
-    err.textContent = '로그인 중 오류가 발생했습니다.';
-  } finally {
-    btn.disabled = false;
+// index.html now carries its own login overlay (a UX convenience, not a
+// security boundary) that calls this on load to decide whether to show
+// itself. Same three-state logic as the POST side: "misconfigured" fails
+// closed (500) rather than ever reporting authenticated either way,
+// "open" (local dev, no APP_PASSWORD) always reports true since there is
+// nothing to protect, "required" reflects the real cookie check.
+function handleAuthStatus(req, res) {
+  const authState = getAppAuthState();
+  if (authState === "misconfigured") {
+    return sendJson(res, 500, { error: "서버에 접근 비밀번호가 설정되지 않았습니다. 관리자에게 문의해 주세요." });
   }
-});
-</script>
-</body></html>`;
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-  res.end(html);
+  if (authState === "open") {
+    return sendJson(res, 200, { authenticated: true });
+  }
+  return sendJson(res, 200, { authenticated: isAuthedRequest(req) });
 }
 
 async function handleLogin(req, res) {
@@ -4444,9 +4397,9 @@ async function handleLogin(req, res) {
     return sendJson(res, err.statusCode === 413 ? 413 : 400, { error: "요청 형식이 올바르지 않습니다." });
   }
   if (authState === "open") {
-    // Local dev without APP_PASSWORD — nothing to protect, and the login
-    // page is never actually shown in this mode (see handleRequest()'s
-    // gate below), so this only matters for a direct manual call.
+    // Local dev without APP_PASSWORD — nothing to protect. Only matters for
+    // a direct manual call; the overlay already never shows itself in this
+    // mode (handleAuthStatus() above always reports authenticated: true).
     return sendJson(res, 200, { ok: true });
   }
   const submitted = typeof body?.password === "string" ? body.password : "";
@@ -4464,21 +4417,29 @@ async function handleLogin(req, res) {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // Always reachable, auth or not — this IS the auth gate for everything
-  // else.
-  if (req.method === "POST" && url.pathname === "/api/login") {
-    return handleLogin(req, res);
+  // /api/login handles its own auth logic (that IS the login flow) and is
+  // always reachable regardless of auth state — GET reports status, POST
+  // checks the password. Everything else under /api/* is gated below,
+  // before it can ever reach an Anthropic-calling handler. Non-API paths
+  // (the static UI) are never gated here — on Vercel they never even reach
+  // this function (see vercel.json), and locally the login overlay in
+  // index.html is UX only, not the security boundary (section 7 of the
+  // brief: "로그인 UI는 보안 장벽이 아니다. 실제 보안 장벽은 server.js의 API
+  // auth gate다").
+  if (url.pathname === "/api/login") {
+    if (req.method === "GET") return handleAuthStatus(req, res);
+    if (req.method === "POST") return handleLogin(req, res);
+    return sendJson(res, 405, { error: "Method not allowed" });
   }
 
-  const authState = getAppAuthState();
-  if (authState === "misconfigured") {
-    return sendJson(res, 500, { error: "서버에 접근 비밀번호가 설정되지 않았습니다. 관리자에게 문의해 주세요." });
-  }
-  if (authState === "required" && !isAuthedRequest(req)) {
-    if (url.pathname.startsWith("/api/")) {
+  if (url.pathname.startsWith("/api/")) {
+    const authState = getAppAuthState();
+    if (authState === "misconfigured") {
+      return sendJson(res, 500, { error: "서버에 접근 비밀번호가 설정되지 않았습니다. 관리자에게 문의해 주세요." });
+    }
+    if (authState === "required" && !isAuthedRequest(req)) {
       return sendJson(res, 401, { error: "인증이 필요합니다." });
     }
-    return serveLoginPage(res);
   }
 
   if (req.method === "POST" && url.pathname === "/api/generate-draft") {

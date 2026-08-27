@@ -1,12 +1,7 @@
-# index.html must never be served as a public static file — every request,
-# including "/", is routed to api/gateway.js (see vercel.json's rewrites)
-# so the password gate in server.js's handleRequest() always runs first.
-# The function still gets this exact file via vercel.json's
-# functions."api/gateway.js".includeFiles, which force-includes it into the
-# function bundle regardless of this ignore rule — serveStatic() in
-# server.js reads it from there, unauthenticated static hosting is what
-# this file prevents.
-index.html
+# index.html is deployed as a real static file (no longer excluded) — only
+# /api/* is routed through api/gateway.js (see vercel.json), so the static
+# UI is served directly by Vercel and never depends on the function's
+# filesystem/bundling behavior.
 
 # Local-only dev artifacts — never needed by the deployed function.
 test/

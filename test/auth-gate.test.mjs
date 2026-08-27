@@ -1,5 +1,10 @@
-// Single-user password gate (Vercel/Production) — see server.js's
-// "Single-user password gate" section above serveStatic()/handleRequest().
+// Single-user password gate protecting /api/* (Vercel/Production) — see
+// server.js's "Single-user password gate" section above serveStatic()/
+// handleRequest(). The static UI (index.html) is NOT gated by this file's
+// subject: on Vercel it is a real static asset that never reaches
+// handleRequest() at all (vercel.json's rewrites only cover /api/(.*));
+// locally, GET "/" still reaches handleRequest() via npm run dev but is
+// deliberately left ungated (the login overlay in index.html is UX only).
 // Exercises handleRequest() directly with lightweight mock req/res objects
 // compatible with readJsonBody()'s req.on("data"/"end") reads and
 // sendJson()'s res.writeHead()/res.end() writes — no real HTTP server, no
@@ -74,6 +79,14 @@ function withEnv(overrides, fn) {
     });
 }
 
+// --- GET /api/login: unauthenticated -> {authenticated:false} ---
+test("GET /api/login unauthenticated -> {authenticated:false}, 200", () =>
+  withEnv({ APP_PASSWORD: "correct-horse-battery", VERCEL: undefined }, async () => {
+    const res = await callHandler({ method: "GET", url: "/api/login" });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse(res.body), { authenticated: false });
+  }));
+
 // --- A: wrong password -> auth fails ---
 test("A: POST /api/login with wrong password -> 401, no cookie issued", () =>
   withEnv({ APP_PASSWORD: "correct-horse-battery", VERCEL: undefined }, async () => {
@@ -97,6 +110,15 @@ test("B: POST /api/login with correct password -> 200, HttpOnly signed cookie is
     assert.equal(verifyAuthToken(token), true, "the issued token must itself verify");
   }));
 
+// --- GET /api/login with the cookie from B -> {authenticated:true} ---
+test("GET /api/login with a valid auth cookie -> {authenticated:true}", () =>
+  withEnv({ APP_PASSWORD: "correct-horse-battery", VERCEL: undefined }, async () => {
+    const token = signAuthToken(Date.now() + 60_000);
+    const res = await callHandler({ method: "GET", url: "/api/login", cookie: `blog_auth=${token}` });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse(res.body), { authenticated: true });
+  }));
+
 // --- C: unauthenticated /api/* is blocked before it ever reaches a handler ---
 test("C: unauthenticated POST /api/generate-draft -> 401, never reaches the real handler", () =>
   withEnv({ APP_PASSWORD: "correct-horse-battery", VERCEL: undefined }, async () => {
@@ -116,24 +138,26 @@ test("D: authenticated POST /api/generate-draft -> passes the gate (not 401), re
     assert.notEqual(res.statusCode, 401, "an authenticated request must not be blocked by the auth gate");
   }));
 
-// --- E: Production (Vercel) with no APP_PASSWORD -> fail closed, never silently public ---
-test("E: VERCEL set + no APP_PASSWORD -> fail closed (500) for both the UI and the API", () =>
+// --- E: Production (Vercel) with no APP_PASSWORD -> /api/* fails closed, never silently public ---
+test("E: VERCEL set + no APP_PASSWORD -> every /api/* request (including /api/login) fails closed (500)", () =>
   withEnv({ APP_PASSWORD: undefined, VERCEL: "1" }, async () => {
     assert.equal(getAppAuthState(), "misconfigured");
-
-    const uiRes = await callHandler({ method: "GET", url: "/" });
-    assert.equal(uiRes.statusCode, 500);
-    assert.match(uiRes.body, /비밀번호가 설정되지 않았습니다/);
 
     const apiRes = await callHandler({ method: "POST", url: "/api/generate-draft", jsonBody: { topic: "test" } });
     assert.equal(apiRes.statusCode, 500);
     assert.match(apiRes.body, /비밀번호가 설정되지 않았습니다/);
+
+    const loginStatusRes = await callHandler({ method: "GET", url: "/api/login" });
+    assert.equal(loginStatusRes.statusCode, 500);
+    assert.match(loginStatusRes.body, /비밀번호가 설정되지 않았습니다/);
   }));
 
 // --- bonus: local dev without APP_PASSWORD stays open (unchanged workflow) ---
 test("local dev (no VERCEL, no APP_PASSWORD) -> auth is skipped entirely, existing workflow unchanged", () =>
   withEnv({ APP_PASSWORD: undefined, VERCEL: undefined }, async () => {
     assert.equal(getAppAuthState(), "open");
-    const res = await callHandler({ method: "POST", url: "/api/generate-draft", jsonBody: {} });
-    assert.notEqual(res.statusCode, 401);
+    const apiRes = await callHandler({ method: "POST", url: "/api/generate-draft", jsonBody: {} });
+    assert.notEqual(apiRes.statusCode, 401);
+    const statusRes = await callHandler({ method: "GET", url: "/api/login" });
+    assert.deepEqual(JSON.parse(statusRes.body), { authenticated: true });
   }));

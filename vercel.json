@@ -1,10 +1,5 @@
 {
-  "functions": {
-    "api/gateway.js": {
-      "includeFiles": "index.html"
-    }
-  },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/api/gateway" }
+    { "source": "/api/(.*)", "destination": "/api/gateway" }
   ]
 }

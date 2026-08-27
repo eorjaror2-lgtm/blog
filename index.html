@@ -485,10 +485,81 @@
             box-shadow: none;
             transform: none;
         }
+
+        /* Login overlay — UX only, not the security boundary (that is the
+           server's /api/* auth gate). Shown by default so there is no flash
+           of the underlying app before the /api/login GET check resolves. */
+        .auth-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, .55);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+
+        .auth-card {
+            background: #fff;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, .15);
+            width: min(90vw, 320px);
+        }
+
+        .auth-card h2 {
+            font-size: 1.15rem;
+            margin: 0 0 1.25rem;
+            text-align: center;
+            color: #1e293b;
+        }
+
+        .auth-card input[type=password] {
+            width: 100%;
+            box-sizing: border-box;
+            padding: .65rem .75rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 1rem;
+            margin-bottom: .75rem;
+        }
+
+        .auth-card button {
+            width: 100%;
+            padding: .65rem;
+            border: 0;
+            border-radius: 8px;
+            background: #4f46e5;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+
+        .auth-card button:disabled {
+            opacity: .6;
+            cursor: default;
+        }
+
+        .auth-error {
+            color: #dc2626;
+            font-size: .85rem;
+            min-height: 1.2em;
+            margin: 0 0 .5rem;
+            text-align: center;
+        }
     </style>
 </head>
 
 <body>
+    <div id="authOverlay" class="auth-overlay" style="display:flex;">
+        <form id="authForm" class="auth-card">
+            <h2>블로그 자동화</h2>
+            <div id="authError" class="auth-error"></div>
+            <input type="password" id="authPassword" placeholder="비밀번호" autocomplete="current-password" required>
+            <button type="submit" id="authSubmitBtn">로그인</button>
+        </form>
+    </div>
+
 
     <div class="container">
         <div class="header">
@@ -1283,6 +1354,60 @@
                 btn.style.background = "var(--primary)";
             }, 2000);
         }
+
+        // Login overlay — UX convenience only. The actual protection is the
+        // server's /api/* auth gate (server.js handleRequest()): forging or
+        // hiding this overlay never lets a browser call the Anthropic-
+        // calling endpoints without a valid auth cookie. The password is
+        // only ever held in this input's value for the duration of the POST
+        // below — never written to localStorage/sessionStorage, and cleared
+        // immediately after a successful login.
+        (function () {
+            const overlay = document.getElementById('authOverlay');
+            const form = document.getElementById('authForm');
+            const errorEl = document.getElementById('authError');
+            const passwordInput = document.getElementById('authPassword');
+            const submitBtn = document.getElementById('authSubmitBtn');
+
+            function hideOverlay() { overlay.style.display = 'none'; }
+            function showOverlay() { overlay.style.display = 'flex'; }
+
+            fetch('/api/login', { method: 'GET' })
+                .then((res) => res.json())
+                .then((data) => {
+                    if (data && data.authenticated) hideOverlay();
+                    else showOverlay();
+                })
+                .catch(() => showOverlay());
+
+            form.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const password = passwordInput.value;
+                errorEl.textContent = '';
+                submitBtn.disabled = true;
+                fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password }),
+                })
+                    .then((res) => {
+                        if (res.ok) {
+                            passwordInput.value = '';
+                            hideOverlay();
+                            return;
+                        }
+                        return res.json().then((data) => {
+                            errorEl.textContent = (data && data.error) || '비밀번호가 올바르지 않습니다.';
+                        });
+                    })
+                    .catch(() => {
+                        errorEl.textContent = '로그인 중 오류가 발생했습니다.';
+                    })
+                    .finally(() => {
+                        submitBtn.disabled = false;
+                    });
+            });
+        })();
     </script>
 </body>
 </html>
