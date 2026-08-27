@@ -4237,14 +4237,33 @@ async function handleFinalizeAdCompliance(req, res) {
   }
 }
 
+// __dirname (source-file-relative) is correct for `node server.js` /
+// `npm run dev` and is tried first, unchanged from before. On Vercel,
+// api/gateway.js's bundler can relocate the code that originally lived in
+// this file, so import.meta.url (and therefore __dirname) no longer points
+// at this project's root the way it does locally — index.html (placed at
+// the project root by vercel.json's functions."api/gateway.js".includeFiles)
+// can end up not found via that path even though it was bundled. Vercel
+// Node functions reliably set the process cwd to the function's own root,
+// so process.cwd() is tried as a second candidate — this is additive only;
+// local dev never reaches it because the first candidate already succeeds.
 async function serveStatic(req, res) {
-  try {
-    const html = await readFile(join(__dirname, "index.html"));
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(html);
-  } catch {
-    sendJson(res, 404, { error: "Not found" });
+  const candidates = [join(__dirname, "index.html")];
+  if (process.cwd() !== __dirname) candidates.push(join(process.cwd(), "index.html"));
+
+  let lastErr;
+  for (const path of candidates) {
+    try {
+      const html = await readFile(path);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(html);
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  console.error("[server] serveStatic: index.html not found at any candidate path:", candidates, lastErr?.message);
+  sendJson(res, 404, { error: "Not found" });
 }
 
 // ---------------------------------------------------------------------------
