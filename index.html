@@ -327,6 +327,36 @@
             margin-bottom: 24px;
         }
 
+        /* Phase 4B-1: ad compliance procedural notice (amber) — distinct
+           from the pass/blocked review-status colors, since a
+           confirm_requirement notice is a caution, not a pass/fail verdict. */
+        .procedural-notice {
+            display: none;
+            font-size: 13px;
+            color: #92400e;
+            background: rgba(254, 243, 199, 0.6);
+            border: 1px solid rgba(180, 83, 9, 0.25);
+            border-radius: 12px;
+            padding: 10px 16px;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .classification-badge {
+            display: none;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin: 0 0 20px 0;
+        }
+
+        .policy-meta {
+            display: none;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 10px;
+            text-align: center;
+        }
+
         /* Warning / blocking issue cards */
         .issue-section {
             display: none;
@@ -509,8 +539,13 @@
                     <span id="keywordDensity">키워드 등장: <b>0</b>회</span>
                 </div>
             </div>
+            <div class="review-status" id="overallStatus"></div>
             <div class="review-status" id="reviewStatus"></div>
             <div class="review-substatus" id="reviewSubstatus"></div>
+            <div class="review-status" id="adReviewStatus"></div>
+            <div class="review-substatus" id="adReviewSubstatus"></div>
+            <div class="procedural-notice" id="priorReviewNotice"></div>
+            <div class="classification-badge" id="classificationBadge"></div>
             <div class="timing-summary" id="timingSummary"></div>
             <div class="evidence-status" id="evidenceStatus"></div>
 
@@ -529,6 +564,16 @@
                 <div id="warningList"></div>
             </div>
 
+            <div class="issue-section" id="adBlockingSection">
+                <h3>⚠️ 의료광고 표현 차단 항목</h3>
+                <div id="adBlockingList"></div>
+            </div>
+
+            <div class="issue-section" id="adWarningsSection">
+                <h3>의료광고 표현 참고사항 <span id="adWarningCount"></span></h3>
+                <div id="adWarningList"></div>
+            </div>
+
             <div class="sources-section" id="sourcesSection">
                 <h3 id="sourcesHeading">참고 근거 / 출처</h3>
                 <div id="sourcesList"></div>
@@ -543,7 +588,8 @@
                 <pre id="researchText"></pre>
             </details>
 
-            <p class="result-disclaimer">AI 기반 근거·사실 검토 결과이며, 최종 게시 전 의료인의 확인이 필요합니다.</p>
+            <p class="result-disclaimer">AI 기반 의학·사실 및 의료광고 표현 검토 결과입니다. 공식 의료광고 심의나 법률 자문을 대체하지 않으며, 최종 게시 전 의료인의 확인이 필요합니다.</p>
+            <p class="policy-meta" id="policyMeta"></p>
         </div>
 
         <p class="server-note">Claude API는 서버에서 안전하게 연결됩니다.</p>
@@ -566,6 +612,27 @@
             soften: '표현 완화 권장',
             clarify: '명확화 권장',
             keep_but_reduce: '축소 권장',
+        };
+
+        // Phase 4B-1: ad compliance issues use their own recommendedAction
+        // enum (remove/soften/clarify/human_review) — separate from the
+        // medical reviewer's (which has keep_but_reduce instead of
+        // human_review) — so this is its own label map, not a shared one.
+        const AD_ISSUE_ACTION_LABELS = {
+            remove: '삭제 권장',
+            soften: '표현 완화 권장',
+            clarify: '명확화 권장',
+            human_review: '전문가 확인 권장',
+        };
+
+        // Small, deliberately non-legal-sounding display labels — never a
+        // "confirmed"/"determined" verdict, matching the server's own
+        // no-false-legal-certainty policy (Phase 4A-2 section 17 / 4B-1
+        // section 31).
+        const AD_CLASSIFICATION_LABELS = {
+            likely_information: '정보성 콘텐츠로 분류됨',
+            likely_medical_advertising: '광고성 요소가 감지됨',
+            uncertain: '정보성/광고성 구분 확인 필요',
         };
 
         let requestInFlight = false;
@@ -668,6 +735,11 @@
             document.getElementById('charCount').innerHTML = `공백 제외: <b>0</b>자`;
             document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>0</b>회`;
 
+            const overallStatus = document.getElementById('overallStatus');
+            overallStatus.className = 'review-status';
+            overallStatus.textContent = '';
+            overallStatus.style.display = 'none';
+
             const reviewStatus = document.getElementById('reviewStatus');
             reviewStatus.className = 'review-status';
             reviewStatus.textContent = '';
@@ -676,6 +748,38 @@
             const reviewSubstatus = document.getElementById('reviewSubstatus');
             reviewSubstatus.textContent = '';
             reviewSubstatus.style.display = 'none';
+
+            // Phase 4B-1: ad compliance status/substatus/notice/badge —
+            // reset every run so a previous request's ad warning/blocking
+            // status, procedural notice, or classification badge can never
+            // remain visible on the next result (section 38).
+            const adReviewStatus = document.getElementById('adReviewStatus');
+            adReviewStatus.className = 'review-status';
+            adReviewStatus.textContent = '';
+            adReviewStatus.style.display = 'none';
+
+            const adReviewSubstatus = document.getElementById('adReviewSubstatus');
+            adReviewSubstatus.textContent = '';
+            adReviewSubstatus.style.display = 'none';
+
+            const priorReviewNotice = document.getElementById('priorReviewNotice');
+            priorReviewNotice.textContent = '';
+            priorReviewNotice.style.display = 'none';
+
+            const classificationBadge = document.getElementById('classificationBadge');
+            classificationBadge.textContent = '';
+            classificationBadge.style.display = 'none';
+
+            document.getElementById('adBlockingList').textContent = '';
+            document.getElementById('adBlockingSection').style.display = 'none';
+
+            document.getElementById('adWarningList').textContent = '';
+            document.getElementById('adWarningCount').textContent = '';
+            document.getElementById('adWarningsSection').style.display = 'none';
+
+            const policyMeta = document.getElementById('policyMeta');
+            policyMeta.textContent = '';
+            policyMeta.style.display = 'none';
 
             const timingSummary = document.getElementById('timingSummary');
             timingSummary.textContent = '';
@@ -757,6 +861,64 @@
             if (warnings.length > 0) {
                 warnings.forEach((issue) => warningList.appendChild(createIssueCard(issue, false)));
                 warningsSection.style.display = 'block';
+            }
+        }
+
+        // Phase 4B-1 — ad compliance issue card. Separate from
+        // createIssueCard() above because the shape differs: an ad issue's
+        // rule metadata lives under issue.policy (server-enriched from
+        // ruleId — see enrichAdComplianceReviewIssues() in server.js), not a
+        // flat .category field, and its recommendedAction enum includes
+        // human_review instead of keep_but_reduce. draftExcerpt/reason/
+        // ruleSummary are all still untrusted server text — textContent
+        // only, never innerHTML (section 39).
+        function createAdIssueCard(issue, isBlocking) {
+            const card = document.createElement('div');
+            card.className = 'issue-card' + (isBlocking ? ' blocking' : '');
+
+            const excerpt = document.createElement('div');
+            excerpt.className = 'issue-excerpt';
+            excerpt.textContent = typeof issue.draftExcerpt === 'string' ? issue.draftExcerpt : '';
+            card.appendChild(excerpt);
+
+            const reason = document.createElement('div');
+            reason.textContent = typeof issue.reason === 'string' ? issue.reason : '';
+            card.appendChild(reason);
+
+            const meta = document.createElement('div');
+            meta.className = 'issue-meta';
+            const ruleSummary = (issue.policy && typeof issue.policy.ruleSummary === 'string') ? issue.policy.ruleSummary : '';
+            const actionText = AD_ISSUE_ACTION_LABELS[issue.recommendedAction] || issue.recommendedAction || '';
+            meta.textContent = [ruleSummary, actionText].filter(Boolean).join(' · ');
+            card.appendChild(meta);
+
+            return card;
+        }
+
+        // adReview.issues is the single source of truth for both ad sections
+        // — there is no separate "initial ad review" to prefer over, unlike
+        // the medical finalReview/initialReview split (ad review runs at
+        // most once per finalize call).
+        function renderAdIssues(issues) {
+            const list = Array.isArray(issues) ? issues : [];
+            const blocking = list.filter((i) => i && i.severity === 'blocking');
+            const warnings = list.filter((i) => i && i.severity === 'warning');
+
+            const adBlockingSection = document.getElementById('adBlockingSection');
+            const adBlockingList = document.getElementById('adBlockingList');
+            adBlockingList.textContent = '';
+            if (blocking.length > 0) {
+                blocking.forEach((issue) => adBlockingList.appendChild(createAdIssueCard(issue, true)));
+                adBlockingSection.style.display = 'block';
+            }
+
+            const adWarningsSection = document.getElementById('adWarningsSection');
+            const adWarningList = document.getElementById('adWarningList');
+            document.getElementById('adWarningCount').textContent = warnings.length > 0 ? `${warnings.length}건` : '';
+            adWarningList.textContent = '';
+            if (warnings.length > 0) {
+                warnings.forEach((issue) => adWarningList.appendChild(createAdIssueCard(issue, false)));
+                adWarningsSection.style.display = 'block';
             }
         }
 
@@ -858,6 +1020,107 @@
             reviewSubstatus.style.display = 'block';
         }
 
+        // Phase 4B-1 — top-level summary banner. automatedChecksPassed is a
+        // purely deterministic AND of medicalFactReady/adComplianceReady
+        // computed server-side (never re-derived here) — this function only
+        // chooses wording, never re-evaluates the condition.
+        function renderOverallStatus(automatedChecksPassed) {
+            const overallStatus = document.getElementById('overallStatus');
+            if (automatedChecksPassed) {
+                overallStatus.className = 'review-status pass';
+                overallStatus.textContent = '✅ 자동 게시 전 검토 통과';
+            } else {
+                overallStatus.className = 'review-status blocked';
+                overallStatus.textContent = '⚠️ 자동 게시 전 검토에서 수정이 필요한 항목이 있습니다.';
+            }
+            overallStatus.style.display = 'flex';
+        }
+
+        // Phase 4B-1 — ad compliance status banner + procedural notice +
+        // classification badge. workflow.adReviewSkippedReason (only set
+        // when medicalFactReady was false, so ad review never ran — see
+        // runFinalizeAdComplianceStep() in server.js) suppresses the ad
+        // banner entirely rather than showing a misleading pass/fail for a
+        // check that never happened; the existing medical review-status
+        // banner already explains the medical blocking in that case.
+        // D — workflow.adBlockingCount/adWarningCount are the source of
+        // truth, but if either is ever not a valid finite number (should not
+        // happen from the current server response shape, but guarded rather
+        // than assumed), fall back to counting adReview.issues by severity,
+        // then to 0. Prevents "undefined건"/"null건"/"NaN건" from ever
+        // reaching the screen.
+        function resolveAdIssueCount(value, issues, severity) {
+            if (typeof value === 'number' && Number.isFinite(value)) return value;
+            if (Array.isArray(issues)) return issues.filter((i) => i && i.severity === severity).length;
+            return 0;
+        }
+
+        function renderAdReviewStatus(workflow, adReview) {
+            const adReviewStatus = document.getElementById('adReviewStatus');
+            const adReviewSubstatus = document.getElementById('adReviewSubstatus');
+            const issues = adReview && adReview.issues;
+            const blockingCount = resolveAdIssueCount(workflow.adBlockingCount, issues, 'blocking');
+            const warningCount = resolveAdIssueCount(workflow.adWarningCount, issues, 'warning');
+
+            if (workflow.adReviewSkippedReason) {
+                adReviewStatus.style.display = 'none';
+                adReviewSubstatus.style.display = 'none';
+            } else if (workflow.adComplianceReady) {
+                adReviewStatus.className = 'review-status pass';
+                adReviewStatus.textContent = '✅ 의료광고 표현 검토 통과';
+                adReviewStatus.style.display = 'flex';
+                adReviewSubstatus.textContent = (warningCount > 0)
+                    ? `참고할 표현 ${warningCount}건이 있지만 자동 게시 차단 사유는 아닙니다.`
+                    : '의료광고 표현 관점에서 특별한 문제가 발견되지 않았습니다.';
+                adReviewSubstatus.style.display = 'block';
+            } else {
+                adReviewStatus.className = 'review-status blocked';
+                adReviewStatus.textContent = '⚠️ 의료광고 표현 수정이 필요합니다.';
+                adReviewStatus.style.display = 'flex';
+                adReviewSubstatus.textContent =
+                    `자동 검토에서 의료광고 표현 관련 차단 항목 ${blockingCount}건이 발견되었습니다. 게시 전 표현 수정이 필요합니다.`;
+                adReviewSubstatus.style.display = 'block';
+            }
+
+            // priorReviewCheck is a procedural caution, never a content
+            // blocker — kept visually distinct (amber, non-pass/fail) and
+            // never disables copy on its own (Phase 4A-2 section 19 /
+            // 4B-1 section 30).
+            const notice = document.getElementById('priorReviewNotice');
+            if (adReview && adReview.priorReviewCheck === 'confirm_requirement') {
+                notice.textContent = '이 글은 광고성 요소가 있어 공식 사전심의 대상 여부를 별도로 확인하는 것이 좋습니다.';
+                notice.style.display = 'block';
+            } else {
+                notice.textContent = '';
+                notice.style.display = 'none';
+            }
+
+            const badge = document.getElementById('classificationBadge');
+            const label = adReview ? AD_CLASSIFICATION_LABELS[adReview.contentClassification] : '';
+            if (label) {
+                badge.textContent = label;
+                badge.style.display = 'block';
+            } else {
+                badge.textContent = '';
+                badge.style.display = 'none';
+            }
+        }
+
+        // Phase 4B-1 section 32 — small, always-shown metadata (never the
+        // full policy pack). adPolicy is present even when ad review was
+        // skipped (server still reports which policy version applies — see
+        // getAdCompliancePolicyMetadata() in server.js).
+        function renderPolicyMeta(adPolicy) {
+            const el = document.getElementById('policyMeta');
+            if (!adPolicy || typeof adPolicy.asOfDate !== 'string' || !adPolicy.asOfDate) {
+                el.textContent = '';
+                el.style.display = 'none';
+                return;
+            }
+            el.textContent = `의료광고 정책 기준일: ${adPolicy.asOfDate}`;
+            el.style.display = 'block';
+        }
+
         function renderEvidenceStatus(evidence) {
             const evidenceStatus = document.getElementById('evidenceStatus');
             evidenceStatus.textContent = evidence && evidence.tier2Used
@@ -918,7 +1181,7 @@
                 // --- STEP 2: bounded medical/fact review + repair + final review ---
                 const step2StartTime = Date.now();
                 stepStartTime = step2StartTime;
-                setLoadingMessage('의학적 사실과 근거를 검토하고 있습니다...');
+                setLoadingMessage('의학적 사실과 의료광고 표현을 최종 검토하고 있습니다...');
 
                 const finalizeResponse = await fetch('/api/finalize-evidence-draft', {
                     method: 'POST',
@@ -959,18 +1222,29 @@
                 const keywordHits = (normalizedPlainText.match(new RegExp(escapedKeyword, 'g')) || []).length;
                 document.getElementById('keywordDensity').innerHTML = `키워드 등장: <b>${keywordHits}</b>회`;
 
+                renderOverallStatus(finalizeData.workflow.automatedChecksPassed);
                 renderReviewStatus(finalizeData.workflow);
+                renderAdReviewStatus(finalizeData.workflow, finalizeData.adReview);
                 renderTimingSummary(step1ElapsedMs, step2ElapsedMs, step1ElapsedMs + step2ElapsedMs);
                 renderEvidenceStatus(draftData.evidence);
                 renderIssues(finalizeData.finalReview ? finalizeData.finalReview.issues : []);
+                renderAdIssues(finalizeData.adReview ? finalizeData.adReview.issues : []);
                 renderSources(draftData.sources);
+                renderPolicyMeta(finalizeData.adPolicy);
 
                 if (typeof draftData.research === 'string' && draftData.research.trim()) {
                     document.getElementById('researchText').textContent = sanitizeResearchForDisplay(draftData.research);
                     document.getElementById('researchDetails').style.display = 'block';
                 }
 
-                document.getElementById('copyBtn').disabled = !finalizeData.workflow.medicalFactReady;
+                // Copy only requires that a reviewed final draft exists —
+                // reaching this line means finalize succeeded and
+                // resultText.value is already set above. automatedChecksPassed
+                // (medicalFactReady && adComplianceReady) is informational
+                // only: the physician always reviews before publishing, so an
+                // automated screening result must never block copying the
+                // draft out for that review.
+                document.getElementById('copyBtn').disabled = false;
             } catch (e) {
                 if (requestId !== activeRequestId) return;
                 resultText.value = "❌ 오류 발생: " + e.message;

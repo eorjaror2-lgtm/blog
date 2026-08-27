@@ -5,7 +5,8 @@
   "version": "0.1.0",
   "description": "Blog Automation - Phase 1: Secure Claude draft generation",
   "scripts": {
-    "dev": "node --env-file-if-exists=.env.local server.js"
+    "dev": "node --env-file-if-exists=.env.local server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.120.0",
